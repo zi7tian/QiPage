@@ -1,0 +1,6 @@
+# Copy to local.properties and adjust, or just run:
+#     scripts/setup-linux-toolchain.sh
+# which writes this file for you.
+#
+# local.properties is machine-specific and must never be committed.
+sdk.dir=/absolute/path/to/Android/Sdk

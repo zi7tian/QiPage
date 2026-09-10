@@ -1,0 +1,60 @@
+# ---------------------------------------------------------------------------
+# Build output
+# ---------------------------------------------------------------------------
+build/
+**/build/
+.gradle/
+.kotlin/
+captures/
+.cxx/
+.externalNativeBuild/
+
+# ---------------------------------------------------------------------------
+# Local machine configuration (never commit: absolute paths, SDK location)
+# ---------------------------------------------------------------------------
+local.properties
+
+# ---------------------------------------------------------------------------
+# Signing material. Keys must never enter version control.
+# Generate a local test key with: scripts/gen-test-keystore.sh
+# ---------------------------------------------------------------------------
+*.jks
+*.keystore
+.tools/
+
+# ---------------------------------------------------------------------------
+# Release binaries. APKs are published on GitHub Releases, not committed.
+# ---------------------------------------------------------------------------
+artifacts/**/*.apk
+artifacts/**/*.aab
+# build.sh archives a superseded artifact here instead of clobbering it
+artifacts/**/*.bak
+*.apk
+*.aab
+
+# ---------------------------------------------------------------------------
+# Generated test fixtures (regenerate with scripts/new-fixtures.sh)
+# ---------------------------------------------------------------------------
+fixtures/generated/
+
+# ---------------------------------------------------------------------------
+# Personal / copyrighted sample books (never redistribute)
+# ---------------------------------------------------------------------------
+novel_test/
+epub_test/
+
+# ---------------------------------------------------------------------------
+# IDE
+# ---------------------------------------------------------------------------
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# ---------------------------------------------------------------------------
+# OS noise
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini

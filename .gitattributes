@@ -1,0 +1,41 @@
+# Normalize every text file to LF in the repository.
+* text=auto eol=lf
+
+# Gradle wrapper and shell scripts must stay executable and LF.
+gradlew          text eol=lf
+*.sh             text eol=lf
+gradle/wrapper/gradle-wrapper.jar binary
+
+# Windows launcher keeps CRLF so it still runs on Windows checkouts.
+*.bat            text eol=crlf
+
+# Project documentation and sources are Chinese-heavy; keep them as UTF-8
+# without any EOL rewriting so diffs stay readable.
+*.md             text eol=lf
+*.kt             text eol=lf
+*.kts            text eol=lf
+*.java           text eol=lf
+*.xml            text eol=lf
+*.json           text eol=lf
+*.toml           text eol=lf
+*.properties     text eol=lf
+
+# Binary assets: never diff, never convert.
+*.png            binary
+*.jpg            binary
+*.jpeg           binary
+*.webp           binary
+*.gif            binary
+*.ico            binary
+*.apk            binary
+*.aab            binary
+*.jar            binary
+*.zip            binary
+*.epub           binary
+*.ttf            binary
+*.otf            binary
+*.so             binary
+
+# Keep generated evidence out of language statistics on GitHub.
+docs/**/evidence/** linguist-vendored
+fixtures/**         linguist-vendored

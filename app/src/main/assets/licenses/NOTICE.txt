@@ -1,0 +1,21 @@
+栖页 / QiPage 0.3.0-p3 — 第三方组件说明
+
+运行时组件
+AndroidX Activity、Lifecycle、SavedState、Core、Collection、Annotation、Startup、ProfileInstaller、Compose UI / Foundation / Material3、Room / SQLite、DataStore，以及它们的 AndroidX 传递依赖。
+Copyright The Android Open Source Project.
+许可：Apache License, Version 2.0。
+
+Kotlin 标准库及 kotlinx.coroutines。
+Copyright JetBrains s.r.o. and Kotlin Programming Language contributors.
+许可：Apache License, Version 2.0。
+
+Desugar JDK libraries：Android Open Source Project / OpenJDK 衍生的 Java API 兼容实现。
+许可：GPL version 2 with the Classpath Exception，原文随附 Desugar-GPL2-Classpath.txt。
+版本 2.1.5；源码与版权声明：https://github.com/google/desugar_jdk_libs
+发行来源：https://dl.google.com/dl/android/maven2/com/android/tools/desugar_jdk_libs/2.1.5/
+
+系统 Android WebView 由设备系统提供，不随本 APK 捆绑 Chromium。
+本应用不包含网络、云同步、广告、统计 SDK，不捆绑字体。
+
+上述许可适用于对应第三方代码；不代表本项目整体已授予开源许可。
+
