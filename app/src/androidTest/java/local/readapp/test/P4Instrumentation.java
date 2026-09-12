@@ -31,6 +31,31 @@ public final class P4Instrumentation extends Instrumentation {
                 back();await("+",8000);swipe(.08f,.5f,.85f,.5f);await("QiPage",8000);
                 check(!text().contains("阅读设置"),"书架抽屉不再提供阅读设置入口");
                 check(true,"恢复默认偏好，不清除书架数据");
+            }else if(mode.equals("columns")){
+                // Diagnostic: report which CSS columns actually hold content and
+                // where each chapter heading lands. Used to find stray blank pages.
+                await("目录 / 书签",65000);awaitPage();SystemClock.sleep(2200);
+                // Optionally land on a later chapter first, so spine boundaries
+                // deep in a multi-file book can be inspected too.
+                String want=args.getString("chapter","");
+                if(want.length()>0&&webOrNull(activity)!=null){
+                    click("目录 / 书签");SystemClock.sleep(1500);
+                    AccessibilityNodeInfo pick=find(root(),want,true);
+                    if(pick==null)throw new IllegalStateException("chapter not in TOC: "+want);
+                    clickNode(pick);SystemClock.sleep(2600);awaitPage();
+                }
+                android.webkit.WebView cw=findWeb(activity.getWindow().getDecorView());
+                if(cw==null)throw new IllegalStateException("no webview");
+                String map=js(cw,"JSON.stringify((function(){var pages=document.getElementById('pages'),vp=document.getElementById('viewport'),W=innerWidth,H=innerHeight,sl=vp.scrollLeft;var total=Math.ceil((pages.scrollWidth+parseFloat(getComputedStyle(pages).marginLeft)*2)/W);var frag=[],fill=[];for(var i=0;i<total;i++){frag.push(0);fill.push(0);}var kids=pages.children;for(var i=0;i<kids.length;i++){var rs=kids[i].getClientRects();for(var j=0;j<rs.length;j++){var r=rs[j];if(r.width<=0||r.height<=0)continue;var c=Math.floor((r.left+sl)/W);if(c<0||c>=total)continue;frag[c]++;fill[c]+=r.height;}}var heads=[];var hs=pages.querySelectorAll('h1,h2,h3');for(var i=0;i<hs.length;i++){var r=hs[i].getBoundingClientRect();heads.push({t:hs[i].textContent.slice(0,14),col:Math.floor((r.left+sl)/W)});}return {total:total,frag:frag,fill:fill.map(function(v){return Math.round(v);}),heads:heads,H:H};})())");
+                result.put("columns",new JSONObject(map));
+                AccessibilityNodeInfo pn=pageNode(root());
+                result.put("pageText",pn==null?"<null>":String.valueOf(pn.getContentDescription()));
+                result.put("footer",footer()==null?"<null>":footerText());
+                shot("columns-"+args.getString("chapter","first"));
+                sendStatus(0,statusBundle("COLUMNS "+map+"\n"));
+                check(true,"列布局已导出");
+            }else if(mode.equals("v2")){
+                runV2(activity,result);
             }else if(mode.equals("fixes")){
                 runFixes(activity,result);
             }else if(mode.equals("performance")){
@@ -204,6 +229,75 @@ public final class P4Instrumentation extends Instrumentation {
 
     }
 
+    /**
+     * Verifies the second round of reader fixes end to end on a device:
+     * tap priority while the panel is open, directory auto-location, the
+     * bookshelf search entry, the bookmark placeholder and indexed search with
+     * in-page highlighting.
+     */
+    private void runV2(Activity activity,JSONObject result)throws Exception{
+        await("目录 / 书签",65000);awaitPage();SystemClock.sleep(1800);
+        android.webkit.WebView web=findWeb(activity.getWindow().getDecorView());
+        check(web!=null,"EPUB 阅读界面就绪");
+
+        // (1) typography knobs reach the renderer
+        String css=js(web,"(function(){var cs=getComputedStyle(document.getElementById('pages'));return cs.textAlign+'|'+cs.letterSpacing+'|'+cs.lineBreak;})()");
+        check(css.startsWith("justify"),"EPUB 正文两端对齐（"+css+"）");
+
+        // (3) with the panel open, an edge tap must close it, not turn the page
+        String before=footerText();
+        touch(.5f,.3f,.5f,.3f,80);await("阅读设置",6000);
+        check(text().contains("排版"),"点击中央打开排版面板");
+        long now=SystemClock.uptimeMillis();
+        android.util.DisplayMetrics m=getTargetContext().getResources().getDisplayMetrics();
+        inject(now,now,MotionEvent.ACTION_DOWN,m.widthPixels*.9f,m.heightPixels*.5f);
+        inject(now,SystemClock.uptimeMillis(),MotionEvent.ACTION_UP,m.widthPixels*.9f,m.heightPixels*.5f);
+        SystemClock.sleep(1200);
+        check(!text().contains("排版"),"面板打开时点击边缘先关闭面板而不翻页");
+        check(before.equals(footerText()),"关闭面板没有移动阅读位置（"+footerText()+"）");
+        shot("v2-panel-closed");
+
+        // (4) directory opens on the chapter being read
+        click("目录 / 书签");SystemClock.sleep(1600);
+        String want=args.getString("chapter","第二章 短章");
+        check(text().contains(want),"目录自动定位到当前章节（"+want+" 可见）");
+        shot("v2-toc-current");
+
+        // (7) indexed search, then the match must be highlighted in the page
+        click("搜索");await("搜索全书文字",8000);
+        List<AccessibilityNodeInfo> f=new ArrayList<>();editables(root(),f);
+        check(!f.isEmpty(),"搜索面板提供输入框");
+        set(f.get(0),"山川河流");
+        click("搜索");
+        long deadline=SystemClock.elapsedRealtime()+30000;
+        while(SystemClock.elapsedRealtime()<deadline&&!text().contains("找到"))SystemClock.sleep(300);
+        check(text().contains("找到"),"索引化搜索返回结果");
+        shot("v2-search");
+        clickContaining("山川河流");SystemClock.sleep(2600);awaitPage();
+        long marks=Long.parseLong(js(web,"String(document.querySelectorAll('mark.qp-hl').length)"));
+        check(marks>0,"正文中高亮了命中词组（"+marks+" 处）");
+        shot("v2-highlight");
+
+        // (5)(6) bookshelf entry points and the bookmark placeholder
+        click("目录 / 书签");SystemClock.sleep(1500);click("书签");SystemClock.sleep(900);
+        click("添加当前书签");SystemClock.sleep(1500);
+        // The Material 3 placeholder is painted, not exposed to accessibility, so
+        // capture the dialog and assert the functional half instead.
+        shot("v2-bookmark");
+        click("保存");SystemClock.sleep(1200);
+        check(!text().contains("阅读书签"),"不再预填默认书签名称");
+        check(text().contains("未命名"),"空名称书签以占位文字显示");
+        shot("v2-bookmark-saved");
+        click("关闭");SystemClock.sleep(900);
+        back();await("+",8000);SystemClock.sleep(1200);
+        check(findDescription(root(),"搜索书名")!=null,"书架左上角有放大镜搜索入口");
+        shot("v2-bookshelf");
+        swipe(.08f,.5f,.85f,.5f);await("QiPage",8000);SystemClock.sleep(900);
+        check(!text().contains("阅读设置"),"侧边栏不再有阅读设置");
+        check(!text().contains("返回书架"),"侧边栏不再有返回书架");
+        shot("v2-drawer");
+    }
+
     /** Fraction of sampled pixels that agree between two shots inside a band. */
     private double bandMatch(Bitmap a,Bitmap b,int x0,int x1,int y0,int y1){
         int same=0,total=0;
@@ -236,6 +330,10 @@ public final class P4Instrumentation extends Instrumentation {
         for(int i=0;i<n.getChildCount();i++){AccessibilityNodeInfo r=scrollable(n.getChild(i));if(r!=null)return r;}
         return null;
     }
+
+    private android.webkit.WebView webOrNull(Activity a){return findWeb(a.getWindow().getDecorView());}
+
+    private Bundle statusBundle(String text){Bundle b=new Bundle();b.putString("stream",text);return b;}
 
     private void awaitFooter(String prefix){long end=SystemClock.elapsedRealtime()+10000;while(SystemClock.elapsedRealtime()<end){AccessibilityNodeInfo n=footer();if(n!=null&&n.getText().toString().startsWith(prefix))return;SystemClock.sleep(150);}throw new IllegalStateException("Footer did not settle: "+prefix+" actual="+footerText());}
     private AccessibilityNodeInfo footer(){return footerNode(root());}

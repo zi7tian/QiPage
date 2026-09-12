@@ -12,52 +12,19 @@ import kotlinx.coroutines.ensureActive
  * Matching is a plain case-insensitive substring scan. No regular expressions
  * run against book text, so a pathological query cannot blow up the reader.
  */
-data class SearchHit(val locator: Locator, val chapter: String, val snippet: String)
+data class SearchHit(
+    val locator: Locator,
+    val chapter: String,
+    val snippet: String,
+    /** Length of the match in characters, so the reader can highlight it. */
+    val length: Int,
+)
 
-/** Progress of a running search. [hits] grows as chapters are scanned. */
-data class SearchProgress(val scanned: Int, val total: Int, val hits: List<SearchHit>, val done: Boolean)
+/** Progress while the index is being built. */
+data class SearchProgress(val scanned: Int, val total: Int, val done: Boolean)
 
 private const val SNIPPET_PAD = 24
-
-/**
- * A window of book text with a parallel map back to source offsets, so a match
- * found in the flattened text can still be turned into a locator.
- *
- * Chapters are flattened by concatenating their text runs with a single "\n"
- * between runs; the newline is mapped to the start of the following run.
- */
-private class FlatText {
-    val text = StringBuilder()
-    private val flatStarts = ArrayList<Int>()
-    private val docStarts = ArrayList<Int>()
-
-    fun append(chunk: String, docOffset: Int) {
-        if (chunk.isEmpty()) return
-        flatStarts.add(text.length)
-        docStarts.add(docOffset)
-        text.append(chunk)
-    }
-
-    /** Separator between two runs; maps onto the next run's document offset. */
-    fun separator(nextDocOffset: Int) {
-        if (text.isEmpty()) return
-        flatStarts.add(text.length)
-        docStarts.add(nextDocOffset)
-        text.append('\n')
-    }
-
-    /** Document offset for a flattened index, or -1 when out of range. */
-    fun docOffsetAt(index: Int): Int {
-        if (flatStarts.isEmpty()) return -1
-        var lo = 0
-        var hi = flatStarts.size - 1
-        while (lo < hi) {
-            val mid = (lo + hi + 1) / 2
-            if (flatStarts[mid] <= index) lo = mid else hi = mid - 1
-        }
-        return docStarts[lo] + (index - flatStarts[lo])
-    }
-}
+private const val DEFAULT_LIMIT = 200
 
 /** Collapse whitespace and clip a window around a match for display. */
 internal fun snippetAround(source: String, start: Int, length: Int): String {
@@ -103,137 +70,213 @@ private val BLOCK_TAG = Regex(
     RegexOption.IGNORE_CASE,
 )
 
-/** Flatten sanitized chapter markup into searchable text plus an offset map. */
-private fun flattenChapter(html: String): FlatText {
-    val flat = FlatText()
-    var cursor = 0
-    for (run in TEXT_RUN.findAll(html)) {
-        val docOffset = run.groupValues[1].toIntOrNull() ?: continue
-        val plain = htmlUnescape(run.groupValues[2])
-        if (plain.isNotEmpty()) {
-            if (flat.text.isNotEmpty() && BLOCK_TAG.containsMatchIn(html.substring(cursor, run.range.first))) {
-                flat.separator(docOffset)
-            }
-            flat.append(plain, docOffset)
+/**
+ * An immutable, searchable flattening of a whole book.
+ *
+ * Building the index is the expensive part: for EPUB it has to sanitise every
+ * spine item so that match offsets line up with the offsets the renderer uses
+ * for navigation. It is therefore built once per book and reused, which is what
+ * keeps a query on a two-million-character novel down to a single linear scan
+ * (a few milliseconds) instead of re-parsing the book on every search.
+ */
+class BookSearchIndex private constructor(
+    private val text: String,
+    /** For each run: where it starts in [text]. */
+    private val runStart: IntArray,
+    /** For each run: which spine item / chapter it belongs to. */
+    private val runChapter: IntArray,
+    /** For each run: document offset of `text[runStart]`. */
+    private val runDocBase: IntArray,
+    private val chapters: List<String>,
+    private val hrefs: List<String>,
+    /** Indices into [text] where a paragraph or chapter ends. */
+    private val breaks: IntArray,
+) {
+    val characterCount: Int get() = text.length
+    val chapterCount: Int get() = chapters.size
+
+    private fun runAt(index: Int): Int {
+        var lo = 0
+        var hi = runStart.size - 1
+        while (lo < hi) {
+            val mid = (lo + hi + 1) / 2
+            if (runStart[mid] <= index) lo = mid else hi = mid - 1
         }
-        cursor = run.range.last + 1
+        return lo
     }
-    return flat
+
+    private fun isBlockBoundary(index: Int): Boolean {
+        var lo = 0
+        var hi = breaks.size - 1
+        while (lo <= hi) {
+            val mid = (lo + hi) / 2
+            when {
+                breaks[mid] < index -> lo = mid + 1
+                breaks[mid] > index -> hi = mid - 1
+                else -> return true
+            }
+        }
+        return false
+    }
+
+    /** One linear scan; returns at most [limit] hits in reading order. */
+    fun find(query: String, limit: Int = DEFAULT_LIMIT): List<SearchHit> {
+        val needle = query.trim()
+        if (needle.isEmpty() || limit <= 0 || text.isEmpty()) return emptyList()
+        val hits = ArrayList<SearchHit>()
+        var from = 0
+        while (hits.size < limit) {
+            val at = text.indexOf(needle, from, ignoreCase = true)
+            if (at < 0) break
+            if (isBlockBoundary(at)) {
+                from = at + 1
+                continue
+            }
+            val run = runAt(at)
+            val chapter = runChapter[run]
+            val docOffset = runDocBase[run] + (at - runStart[run])
+            hits.add(
+                SearchHit(
+                    locator = Locator(
+                        format = if (hrefs.isEmpty() || hrefs.all { it.isEmpty() }) "txt" else "epub",
+                        href = hrefs.getOrElse(chapter) { "" },
+                        offset = docOffset.toLong(),
+                    ),
+                    chapter = chapters.getOrElse(chapter) { "" },
+                    snippet = snippetAround(text, at, needle.length),
+                    length = needle.length,
+                )
+            )
+            from = at + 1
+        }
+        return hits
+    }
+
+    private class Builder {
+        val text = StringBuilder()
+        val runStart = ArrayList<Int>()
+        val runChapter = ArrayList<Int>()
+        val runDocBase = ArrayList<Int>()
+        val breaks = ArrayList<Int>()
+        val chapters = ArrayList<String>()
+        val hrefs = ArrayList<String>()
+
+        fun append(chunk: String, chapter: Int, docOffset: Int) {
+            if (chunk.isEmpty()) return
+            runStart.add(text.length)
+            runChapter.add(chapter)
+            runDocBase.add(docOffset)
+            text.append(chunk)
+        }
+
+        /**
+         * Paragraph boundary. A newline is appended so a query cannot match
+         * across two blocks, and the index of that newline is remembered so a
+         * query that literally contains a newline is rejected there too.
+         */
+        fun blockBreak() {
+            if (text.isEmpty()) return
+            breaks.add(text.length)
+            text.append('\n')
+        }
+
+        fun build() = BookSearchIndex(
+            text.toString(),
+            runStart.toIntArray(),
+            runChapter.toIntArray(),
+            runDocBase.toIntArray(),
+            chapters,
+            hrefs,
+            breaks.toIntArray(),
+        )
+    }
+
+    companion object {
+        /**
+         * Flatten a whole TXT book.
+         *
+         * [TextContent.readBlock] performs blocking disk access, so call this
+         * from an IO dispatcher.
+         */
+        suspend fun buildText(
+            content: TextContent,
+            onProgress: suspend (SearchProgress) -> Unit = {},
+        ): BookSearchIndex {
+            val builder = Builder()
+            builder.chapters.add("正文")
+            builder.hrefs.add("")
+            val total = content.blockCount.coerceAtLeast(1)
+            for (index in 0 until total) {
+                coroutineContext.ensureActive()
+                val block = content.readBlock(index)
+                // Blocks are arbitrary read windows, not paragraphs, and the text
+                // already carries real newlines, so no synthetic separator is added.
+                builder.append(block.text, 0, block.start.toInt())
+                if (index % 64 == 0) onProgress(SearchProgress(index + 1, total, false))
+            }
+            onProgress(SearchProgress(total, total, true))
+            return builder.build()
+        }
+
+        /** Flatten a whole EPUB, sanitising every spine item exactly once. */
+        suspend fun buildEpub(
+            epub: EpubContent,
+            onProgress: suspend (SearchProgress) -> Unit = {},
+        ): BookSearchIndex {
+            val builder = Builder()
+            val spine = epub.chapters
+            val titleByHref = epub.toc.associate { it.locator.href to it.title }
+            spine.forEachIndexed { index, item ->
+                coroutineContext.ensureActive()
+                builder.chapters.add(titleByHref[item.path] ?: item.title)
+                builder.hrefs.add(item.path)
+                val html = runCatching { epub.chapter(item.path) }.getOrNull()
+                if (html != null) {
+                    var cursor = 0
+                    var seenRun = false
+                    for (run in TEXT_RUN.findAll(html)) {
+                        val docOffset = run.groupValues[1].toIntOrNull() ?: continue
+                        val plain = htmlUnescape(run.groupValues[2])
+                        if (plain.isEmpty()) {
+                            cursor = run.range.last + 1
+                            continue
+                        }
+                        // Runs inside one block stay contiguous; a block boundary
+                        // in between starts a new paragraph.
+                        if (seenRun && BLOCK_TAG.containsMatchIn(html.substring(cursor, run.range.first))) {
+                            builder.blockBreak()
+                        }
+                        builder.append(plain, index, docOffset)
+                        seenRun = true
+                        cursor = run.range.last + 1
+                    }
+                }
+                // Never let a query run from one chapter into the next.
+                builder.blockBreak()
+                onProgress(SearchProgress(index + 1, spine.size, false))
+            }
+            onProgress(SearchProgress(spine.size, spine.size, true))
+            return builder.build()
+        }
+    }
 }
 
 /**
- * Search the whole of a TXT book.
+ * Convenience wrappers that build a throwaway index and search it once.
  *
- * [TextContent.readBlock] performs blocking disk access, so call this from an
- * IO dispatcher.
+ * The reader holds on to a [BookSearchIndex] so it survives between queries;
+ * these exist for one-off callers and tests.
  */
 suspend fun searchTextContent(
     content: TextContent,
     query: String,
-    limit: Int = 200,
+    limit: Int = DEFAULT_LIMIT,
     onProgress: suspend (SearchProgress) -> Unit = {},
-): List<SearchHit> {
-    val needle = query.trim()
-    if (needle.isEmpty() || limit <= 0) return emptyList()
+): List<SearchHit> = BookSearchIndex.buildText(content, onProgress = onProgress).find(query, limit)
 
-    val hits = ArrayList<SearchHit>()
-    val total = content.blockCount.coerceAtLeast(1)
-    val title = "正文"
-    // Keep the tail of the previous block so a phrase spanning a block boundary
-    // is still found; matches are de-duplicated by absolute offset.
-    val carryLength = (needle.length - 1).coerceAtLeast(0)
-    var carry = ""
-    var carryStart = 0L
-    var lastEmitted = -1L
-
-    for (index in 0 until total) {
-        coroutineContext.ensureActive()
-        val block = content.readBlock(index)
-        val base = if (carry.isEmpty()) block.start else carryStart
-        val haystack = carry + block.text
-        var from = 0
-        while (true) {
-            val at = haystack.indexOf(needle, from, ignoreCase = true)
-            if (at < 0) break
-            val absolute = base + at
-            if (absolute > lastEmitted) {
-                lastEmitted = absolute
-                hits.add(
-                    SearchHit(
-                        locator = Locator(format = "txt", offset = absolute),
-                        chapter = title,
-                        snippet = snippetAround(haystack, at, needle.length),
-                    )
-                )
-                if (hits.size >= limit) {
-                    onProgress(SearchProgress(index + 1, total, hits.toList(), true))
-                    return hits
-                }
-            }
-            from = at + 1
-        }
-        if (carryLength > 0) {
-            // Tail of everything read so far, so a phrase longer than one block is
-            // still found when blocks are shorter than the query.
-            carry = if (haystack.length > carryLength) haystack.takeLast(carryLength) else haystack
-            carryStart = base + haystack.length - carry.length
-        }
-        onProgress(SearchProgress(index + 1, total, hits.toList(), false))
-    }
-    onProgress(SearchProgress(total, total, hits.toList(), true))
-    return hits
-}
-
-/**
- * Search the whole of an EPUB.
- *
- * Every spine item is sanitised and flattened, which is why results are
- * streamed through [onProgress]: on a thousand-chapter book this takes a
- * noticeable amount of time and the user must be able to read hits, see
- * progress and cancel.
- */
 suspend fun searchEpubContent(
     epub: EpubContent,
     query: String,
-    limit: Int = 200,
+    limit: Int = DEFAULT_LIMIT,
     onProgress: suspend (SearchProgress) -> Unit = {},
-): List<SearchHit> {
-    val needle = query.trim()
-    val spine = epub.chapters
-    if (needle.isEmpty() || limit <= 0 || spine.isEmpty()) return emptyList()
-
-    val hits = ArrayList<SearchHit>()
-    val titles = epub.toc.associate { it.locator.href to it.title }
-
-    spine.forEachIndexed { index, item ->
-        coroutineContext.ensureActive()
-        val html = runCatching { epub.chapter(item.path) }.getOrNull()
-        if (html != null) {
-            val flat = flattenChapter(html)
-            val haystack = flat.text.toString()
-            var from = 0
-            while (true) {
-                val at = haystack.indexOf(needle, from, ignoreCase = true)
-                if (at < 0) break
-                val docOffset = flat.docOffsetAt(at)
-                if (docOffset >= 0) {
-                    hits.add(
-                        SearchHit(
-                            locator = Locator(format = "epub", href = item.path, offset = docOffset.toLong()),
-                            chapter = titles[item.path] ?: item.title,
-                            snippet = snippetAround(haystack, at, needle.length),
-                        )
-                    )
-                }
-                if (hits.size >= limit) {
-                    onProgress(SearchProgress(index + 1, spine.size, hits.toList(), true))
-                    return hits
-                }
-                from = at + 1
-            }
-        }
-        onProgress(SearchProgress(index + 1, spine.size, hits.toList(), false))
-    }
-    onProgress(SearchProgress(spine.size, spine.size, hits.toList(), true))
-    return hits
-}
+): List<SearchHit> = BookSearchIndex.buildEpub(epub, onProgress = onProgress).find(query, limit)

@@ -3,6 +3,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import local.readapp.core.TextContent
 internal data class PageText(val text:String,val offsets:LongArray)
+
+/** A run of book text to paint with a highlight, in source coordinates. */
+internal data class Highlight(val start:Long,val length:Int)
 internal fun compactParagraphs(source:String,start:Long):PageText {
     val text=StringBuilder();val map=ArrayList<Long>();var i=0
     while(i<source.length){

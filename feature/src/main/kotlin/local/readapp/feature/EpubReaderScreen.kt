@@ -27,7 +27,7 @@ private data class EpubStyle(val prefs:ReaderPreferences,val bg:Int,val fg:Int,v
 private data class LocalPage(val url:String,val html:String,val font:java.io.File?,val background:java.io.File?)
 private fun cssColor(color:Int)="#"+Integer.toHexString(color and 0xffffff).padStart(6,'0')
 
-@Composable internal fun EpubReaderScreen(open:OpenBook,prefs:ReaderPreferences,jump:JumpRequest?,locate:(String,Locator)->Unit,onBack:()->Unit,onSettings:()->Unit,onNavigation:()->Unit,onJumpHandled:()->Unit){
+@Composable internal fun EpubReaderScreen(open:OpenBook,prefs:ReaderPreferences,settingsOpen:Boolean,highlight:Highlight?,onClearHighlight:()->Unit,jump:JumpRequest?,locate:(String,Locator)->Unit,onBack:()->Unit,onSettings:()->Unit,onNavigation:()->Unit,onJumpHandled:()->Unit){
     val book=checkNotNull(open.epub);val scope=rememberCoroutineScope();val density=LocalDensity.current
     val latestLocate by rememberUpdatedState(locate);val latestSettings by rememberUpdatedState(onSettings)
     val colors=MaterialTheme.colorScheme;val dark=readerIsDark(prefs)
@@ -42,7 +42,8 @@ private fun cssColor(color:Int)="#"+Integer.toHexString(color and 0xffffff).padS
                 val style=EpubStyle(prefs,colors.surface.toArgb(),colors.onSurface.toArgb(),colors.primary.toArgb(),density.fontScale,maxWidth.value,maxHeight.value,dark)
                 AndroidView(modifier=Modifier.fillMaxSize(),factory={EpubSurface(it,book,scope).also {s->surface=s}},update={s->
                     s.changed={f->frame=f;error=null;latestLocate(open.book.id,f.locator)}
-                    s.failed={error=it};s.cover.settings={latestSettings()};s.cover.edgeTap=prefs.tapToTurn
+                    s.failed={error=it};s.cover.settings={latestSettings()};s.cover.edgeTap=prefs.tapToTurn;s.cover.settingsOpen=settingsOpen
+                    s.highlight=highlight;s.onTurn=onClearHighlight
                     s.configure(style,frame?.locator?:first)
                 },onRelease={it.dispose();surface=null})
                 error?.let {Text(it)}
@@ -67,6 +68,8 @@ private class EpubSurface(context:Context,val book:EpubContent,val scope:Corouti
     private var style:EpubStyle?=null;private var generation=0L;private var job:Job?=null
     private var loaded="";private var finished:(()->Unit)?=null
     private var current:EpubFrame?=null;private var pending:EpubFrame?=null
+    var highlight:Highlight?=null
+    var onTurn:(()->Unit)?=null
     private val paths=book.chapters.map {it.path}
     init {
         addView(web,LayoutParams(-1,-1));addView(cover,LayoutParams(-1,-1))
@@ -109,6 +112,7 @@ private class EpubSurface(context:Context,val book:EpubContent,val scope:Corouti
             }
         }
         cover.prepare=prepare@{next,done->
+            highlight=null;onTurn?.invoke()
             val f=current
             if(f==null)done(null) else {
                 var path=f.locator.href;var page=f.page+if(next)1 else -1
@@ -158,9 +162,17 @@ private class EpubSurface(context:Context,val book:EpubContent,val scope:Corouti
                 if(token!=generation)return@evaluateJavascript
                 if(ready!="true"&&attempt<100)web.postDelayed({restore(attempt+1)},50)
                 else web.evaluateJavascript(restoreScript(locator)){
-                    if(token==generation){
-                        if(page==null)snapshot() else web.evaluateJavascript("(function(){var e=document.getElementById('pages'),m=${LAST_CONTENT_PAGE_JS},p=Math.min(m,Math.max(0,$page));e.dataset.page=p;document.getElementById('viewport').scrollLeft=p*innerWidth;})()"){snapshot()}
+                    if(token!=generation)return@evaluateJavascript
+                    val capture={
+                        if(token==generation){
+                            if(page==null)snapshot() else web.evaluateJavascript("(function(){var e=document.getElementById('pages'),m=${LAST_CONTENT_PAGE_JS},p=Math.min(m,Math.max(0,$page));e.dataset.page=p;document.getElementById('viewport').scrollLeft=p*innerWidth;})()"){snapshot()}
+                        }
                     }
+                    // Paint the match before the page is captured, otherwise the
+                    // screenshot used for the frame would not show it.
+                    val hl=highlight
+                    if(hl!=null&&hl.length>0)web.evaluateJavascript(highlightScript(hl.start,hl.length)){capture()}
+                    else capture()
                 }
             }
         }
@@ -179,7 +191,7 @@ private class EpubSurface(context:Context,val book:EpubContent,val scope:Corouti
 }
 internal fun document(body:String,prefs:ReaderPreferences,bg:Int,fg:Int,accent:Int,scale:Float,viewportWidth:Float,viewportHeight:Float,dark:Boolean):String="""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,user-scalable=no"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https://reader.invalid https://qipage.invalid; font-src https://qipage.invalid; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><style>
 @font-face{font-family:QiPageLocal;src:url(https://qipage.invalid/font)}
-html,body{background:${cssColor(bg)};color:${cssColor(fg)};margin:0;padding:0;overflow:hidden;height:${viewportHeight}px;width:${viewportWidth}px}body{overflow:hidden}#viewport{position:relative;overflow:hidden;width:${viewportWidth}px;height:${viewportHeight}px;background:${cssColor(bg)};${if(prefs.backgroundFile.isNotEmpty())"background-image:linear-gradient(rgba(0,0,0,${if(dark)prefs.nightImageDim else 0f}),rgba(0,0,0,${if(dark)prefs.nightImageDim else 0f})),url(https://qipage.invalid/background);background-size:cover;background-position:center;" else ""}}#extent{position:absolute;width:1px;height:1px;top:0}#pages{overflow:visible;overflow-wrap:anywhere;font-family:${if(prefs.fontFile.isNotEmpty())"QiPageLocal,system-ui,sans-serif" else "system-ui,sans-serif"};font-size:${prefs.fontSize*scale}px;line-height:${prefs.fontSize*scale*prefs.lineSpacing}px;margin:4px ${prefs.pageMargin}px;width:${(viewportWidth-prefs.pageMargin*2).coerceAtLeast(1f)}px;height:${(viewportHeight-8).coerceAtLeast(64f)}px;column-width:${(viewportWidth-prefs.pageMargin*2).coerceAtLeast(1f)}px;column-count:1;column-gap:${prefs.pageMargin*2}px;column-fill:auto}p{margin:0 0 ${prefs.paragraphSpacing}px;text-indent:2em}p:empty{display:none}p>img:first-child{margin-left:-2em}#pages>:last-child{margin-bottom:0}h1,h2,h3,h4,h5,h6{font-weight:700;text-align:left;line-height:1.25;margin:0 0 ${prefs.paragraphSpacing+6}px;break-after:avoid}h1,h2,h3{break-before:column}h1,h2,h3,h4,h5,h6{font-size:1.18em}img{max-width:100%;max-height:${(viewportHeight-32).coerceAtLeast(32f)}px;object-fit:contain;height:auto;break-inside:avoid}a{color:${cssColor(accent)}}pre{white-space:pre-wrap}table{max-width:100%;border-collapse:collapse}td,th{border:1px solid;padding:4px}blockquote{margin:0 0 ${prefs.paragraphSpacing}px;padding-left:16px;border-left:2px solid}*{box-sizing:border-box;orphans:1;widows:1}</style></head><body><div id="viewport"><div id="pages">$body</div><div id="extent"></div></div></body></html>"""
+html,body{background:${cssColor(bg)};color:${cssColor(fg)};margin:0;padding:0;overflow:hidden;height:${viewportHeight}px;width:${viewportWidth}px}body{overflow:hidden}#viewport{position:relative;overflow:hidden;width:${viewportWidth}px;height:${viewportHeight}px;background:${cssColor(bg)};${if(prefs.backgroundFile.isNotEmpty())"background-image:linear-gradient(rgba(0,0,0,${if(dark)prefs.nightImageDim else 0f}),rgba(0,0,0,${if(dark)prefs.nightImageDim else 0f})),url(https://qipage.invalid/background);background-size:cover;background-position:center;" else ""}}#extent{position:absolute;width:1px;height:1px;top:0}#pages{overflow:visible;overflow-wrap:break-word;word-break:normal;line-break:strict;text-align:${if(prefs.justify)"justify" else "start"};letter-spacing:${prefs.letterSpacing}em;font-family:${if(prefs.fontFile.isNotEmpty())"QiPageLocal,system-ui,sans-serif" else "system-ui,sans-serif"};font-size:${prefs.fontSize*scale}px;line-height:${prefs.fontSize*scale*prefs.lineSpacing}px;margin:4px ${prefs.pageMargin}px;width:${(viewportWidth-prefs.pageMargin*2).coerceAtLeast(1f)}px;height:${(viewportHeight-8).coerceAtLeast(64f)}px;column-width:${(viewportWidth-prefs.pageMargin*2).coerceAtLeast(1f)}px;column-count:1;column-gap:${prefs.pageMargin*2}px;column-fill:auto}p{margin:0 0 ${prefs.paragraphSpacing}px;text-indent:2em}p:empty{display:none}p>img:first-child{margin-left:-2em}#pages>:last-child{margin-bottom:0}h1,h2,h3,h4,h5,h6{font-weight:700;text-align:left;line-height:1.25;margin:0 0 ${prefs.paragraphSpacing+6}px;break-after:avoid}h1,h2,h3{break-before:column}h1,h2,h3,h4,h5,h6{font-size:1.18em}img{max-width:100%;max-height:${(viewportHeight-32).coerceAtLeast(32f)}px;object-fit:contain;height:auto;break-inside:avoid}a{color:${cssColor(accent)}}mark.qp-hl{background:#66FFB300;color:inherit}pre{white-space:pre-wrap}table{max-width:100%;border-collapse:collapse}td,th{border:1px solid;padding:4px}blockquote{margin:0 0 ${prefs.paragraphSpacing}px;padding-left:16px;border-left:2px solid}*{box-sizing:border-box;orphans:1;widows:1}</style></head><body><div id="viewport"><div id="pages">$body</div><div id="extent"></div></div></body></html>"""
 /**
  * JS expression evaluating to the index of the last column that actually holds
  * content.
@@ -191,12 +203,52 @@ html,body{background:${cssColor(bg)};color:${cssColor(fg)};margin:0;padding:0;ov
  * the reported last page on purpose. Measuring the real content extent instead
  * keeps the page count honest.
  */
+/**
+ * JS expression snapping a wanted page index to the nearest column that really
+ * holds content.
+ *
+ * Whatever produces a contentless column - a forced column break landing on a
+ * boundary, or a trailing margin - the reader must never display it nor land on
+ * it. This walks the child fragments, then takes the target column if it has
+ * content, else the closest one that does.
+ */
+internal fun nearestContentPageJs(target:String):String="""(function(){var pages=document.getElementById('pages'),W=innerWidth,m=parseFloat(getComputedStyle(pages).marginLeft),total=Math.max(1,Math.ceil((pages.scrollWidth+m*2)/W)),has=[],i;for(i=0;i<total;i++)has.push(false);var kids=pages.children;for(i=0;i<kids.length;i++){var rs=kids[i].getClientRects();for(var j=0;j<rs.length;j++){var r=rs[j];if(r.width<=0||r.height<=0)continue;var c=Math.floor(r.left/W);if(c>=0&&c<total)has[c]=true;}}var t=Math.round($target);if(t<0)t=0;if(t>=total)t=total-1;if(has[t])return t;for(var d=1;d<total;d++){if(t+d<total&&has[t+d])return t+d;if(t-d>=0&&has[t-d])return t-d;}return t;})()"""
+
+/** Wraps one match in `<mark class="qp-hl">` so the reader can see it. */
+internal fun highlightScript(start:Long,length:Int):String="""(function(){var t=$start,n=$length,list=document.querySelectorAll('#pages span[data-read]'),i;for(i=0;i<list.length;i++){var el=list[i],o=Number(el.getAttribute('data-read')),txt=el.firstChild;if(!txt||txt.nodeType!==3)continue;if(o+txt.length<=t||o>=t+n)continue;var a=Math.max(0,t-o),b=Math.min(txt.length,t+n-o);if(b<=a)continue;var r=document.createRange();r.setStart(txt,a);r.setEnd(txt,b);var mk=document.createElement('mark');mk.className='qp-hl';try{r.surroundContents(mk);}catch(e){}}return 1;})()"""
+
+/** Drops any previous highlight, restoring the plain text nodes. */
+private const val CLEAR_HIGHLIGHT_JS="""(function(){var ms=document.querySelectorAll('mark.qp-hl');for(var i=0;i<ms.length;i++){var m=ms[i],p=m.parentNode;while(m.firstChild)p.insertBefore(m.firstChild,m);p.removeChild(m);p.normalize();}return ms.length;})();"""
+
 internal const val LAST_CONTENT_PAGE_JS="""(function(){var v=document.getElementById('viewport'),sl=v?v.scrollLeft:0,n=document.querySelectorAll('#pages *'),right=0;for(var i=0;i<n.length;i++){var b=n[i].getBoundingClientRect();if(b.width<=0||b.height<=0)continue;var e=b.right+sl;if(e>right)right=e;}return Math.max(0,Math.ceil((right-1)/innerWidth)-1);})()"""
 
 private const val CAPTURE="""(function(){var container=document.getElementById('pages'),margin=parseFloat(getComputedStyle(container).marginLeft),list=document.querySelectorAll('span[data-read]'),chosen=null,offset=0;var r=document.caretRangeFromPoint?document.caretRangeFromPoint(margin+1,10+parseFloat(getComputedStyle(container).fontSize)*.5):null;if(r&&r.startContainer.nodeType===3){var p=r.startContainer.parentElement;if(p&&p.hasAttribute('data-read')){chosen=p;offset=r.startOffset;}}if(!chosen){for(var i=0;i<list.length;i++){var rects=list[i].getClientRects();for(var j=0;j<rects.length;j++){var rect=rects[j];if(rect.right>0&&rect.left<innerWidth&&rect.bottom>0&&rect.top<innerHeight){chosen=list[i];break;}}if(chosen)break;}}var max=${LAST_CONTENT_PAGE_JS},page=Number(document.getElementById('pages').dataset.page||0);var starts=[0],heads=document.querySelectorAll("[data-chapter],h1,h2,h3");for(var k=0;k<heads.length;k++){var n=Math.max(0,Math.round((heads[k].getBoundingClientRect().left+document.getElementById("viewport").scrollLeft)/innerWidth));if(starts.indexOf(n)<0)starts.push(n);}starts.sort(function(a,b){return a-b;});var section=0,sectionEnd=max+1;for(var k=0;k<starts.length;k++){if(starts[k]<=page)section=starts[k];else{sectionEnd=starts[k];break;}}var visible=[];for(var k=0;k<list.length;k++){var rs=list[k].getClientRects();for(var j=0;j<rs.length;j++){if(rs[j].left<innerWidth&&rs[j].right>0&&rs[j].bottom>0&&rs[j].top<innerHeight){visible.push(list[k].textContent);break;}}}return JSON.stringify({anchor:chosen?chosen.id:'',offset:chosen?Number(chosen.getAttribute('data-read'))+offset:0,page:page,count:max+1,section:section,sectionEnd:sectionEnd,text:visible.join(" ")});})()"""
-private fun restoreScript(locator:Locator):String {
-    val anchor=JSONObject.quote(locator.anchor)
-    return """(function(){var container=document.getElementById('pages'),margin=parseFloat(getComputedStyle(container).marginLeft);container.style.width=(innerWidth-margin*2)+'px';container.style.columnWidth=(innerWidth-margin*2)+'px';document.getElementById('viewport').style.width=innerWidth+'px';document.getElementById('viewport').scrollLeft=0;container.dataset.page=0;var max=${LAST_CONTENT_PAGE_JS};document.getElementById('extent').style.left=((max+1)*innerWidth-1)+'px';if(${locator.offset}>=9007199254740991){var e=document.getElementById('pages');e.dataset.page=max;document.getElementById('viewport').scrollLeft=max*innerWidth;return;}var anchor=$anchor,n=null,rect=null;if(anchor.indexOf('book-')===0)n=document.getElementById(anchor);if(n)rect=n.getBoundingClientRect();else{var target=${locator.offset.coerceAtLeast(0)},list=document.querySelectorAll('span[data-read]');for(var i=0;i<list.length;i++){if(Number(list[i].getAttribute('data-read'))<=target)n=list[i];else break;}if(n&&n.firstChild){var r=document.createRange(),o=Math.max(0,Math.min(n.firstChild.length,target-Number(n.getAttribute('data-read'))));r.setStart(n.firstChild,o);r.setEnd(n.firstChild,Math.min(n.firstChild.length,o+1));rect=r.getBoundingClientRect();}}var e=document.getElementById('pages'),page=rect?Math.max(0,Math.min(max,Math.floor(rect.left/innerWidth))):0;e.dataset.page=page;document.getElementById('viewport').scrollLeft=page*innerWidth;})()"""
+/**
+ * Quotes a string as a JavaScript literal.
+ *
+ * Deliberately not [org.json.JSONObject.quote]: this runs while building a page
+ * script, and keeping it pure Kotlin means the script can be asserted on the JVM.
+ */
+internal fun jsQuote(value:String):String=buildString {
+    append('"')
+    for(c in value){
+        when(c){
+            '"'->append("\\\"")
+            '\\'->append("\\\\")
+            '\n'->append("\\n")
+            '\r'->append("\\r")
+            '\t'->append("\\t")
+            '\b'->append("\\b")
+            '\u000C'->append("\\f")
+            else->if(c<' ')append("\\u%04x".format(c.code)) else append(c)
+        }
+    }
+    append('"')
+}
+
+internal fun restoreScript(locator:Locator):String {
+    val anchor=jsQuote(locator.anchor)
+    return """(function(){${CLEAR_HIGHLIGHT_JS}var container=document.getElementById('pages'),margin=parseFloat(getComputedStyle(container).marginLeft);container.style.width=(innerWidth-margin*2)+'px';container.style.columnWidth=(innerWidth-margin*2)+'px';document.getElementById('viewport').style.width=innerWidth+'px';document.getElementById('viewport').scrollLeft=0;container.dataset.page=0;var max=${LAST_CONTENT_PAGE_JS};document.getElementById('extent').style.left=((max+1)*innerWidth-1)+'px';if(${locator.offset}>=9007199254740991){var e=document.getElementById('pages'),lp=${nearestContentPageJs("max")};e.dataset.page=lp;document.getElementById('viewport').scrollLeft=lp*innerWidth;return;}var anchor=$anchor,n=null,rect=null;if(anchor.indexOf('book-')===0)n=document.getElementById(anchor);if(n)rect=n.getBoundingClientRect();else{var target=${locator.offset.coerceAtLeast(0)},list=document.querySelectorAll('span[data-read]');for(var i=0;i<list.length;i++){if(Number(list[i].getAttribute('data-read'))<=target)n=list[i];else break;}if(n&&n.firstChild){var r=document.createRange(),o=Math.max(0,Math.min(n.firstChild.length,target-Number(n.getAttribute('data-read'))));r.setStart(n.firstChild,o);r.setEnd(n.firstChild,Math.min(n.firstChild.length,o+1));rect=r.getBoundingClientRect();}}var e=document.getElementById('pages'),raw=rect?Math.max(0,Math.min(max,Math.floor(rect.left/innerWidth))):0,page=${nearestContentPageJs("raw")};e.dataset.page=page;document.getElementById('viewport').scrollLeft=page*innerWidth;})()"""
 }
 
 

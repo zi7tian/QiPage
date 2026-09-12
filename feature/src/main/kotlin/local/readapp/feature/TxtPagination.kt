@@ -11,6 +11,8 @@ import java.io.*
 import kotlin.math.roundToInt
 
 internal data class TextPage(val layout:StaticLayout,val start:Long,val end:Long,val finalBottom:Int,val nextBottom:Int?)
+
+private const val HIGHLIGHT_COLOR=0x66FFB300
 internal class TxtPaginator(val content:TextContent,val toc:List<Chapter>,val prefs:ReaderPreferences,
     val font:Typeface,val width:Int,val height:Int,val density:Float,val fontScale:Float,private val cache:File) {
     val starts=(listOf(0L)+toc.map {it.locator.offset}).distinct().sorted()
@@ -21,9 +23,20 @@ internal class TxtPaginator(val content:TextContent,val toc:List<Chapter>,val pr
     private val windowSize=maxOf(16384,(width/size*height/(size*prefs.lineSpacing)*4).toInt()).coerceAtMost(262144)
     fun chapter(position:Long)=starts.indexOfLast {it<=position}.coerceAtLeast(0)
     fun end(chapter:Int)=starts.getOrNull(chapter+1)?:content.length
-    private fun styled(data:PageText,chapter:Int,color:Int):StaticLayout {
-        val paint=TextPaint(Paint.ANTI_ALIAS_FLAG).apply {typeface=font;textSize=size;this.color=color}
+    private fun styled(data:PageText,chapter:Int,color:Int,highlight:Highlight?=null):StaticLayout {
+        val paint=TextPaint(Paint.ANTI_ALIAS_FLAG).apply {typeface=font;textSize=size;this.color=color;letterSpacing=prefs.letterSpacing}
         val text=SpannableString(data.text)
+        if(highlight!=null){
+            // Map the source range onto this page's text window.
+            var first=-1;var last=-1
+            val stop=highlight.start+highlight.length
+            for(i in 0 until data.text.length){
+                val offset=data.offsets[i]
+                if(first<0&&offset>=highlight.start)first=i
+                if(offset<stop)last=i
+            }
+            if(first>=0&&last>=first)text.setSpan(BackgroundColorSpan(HIGHLIGHT_COLOR),first,(last+1).coerceAtMost(text.length),Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
         val heading=data.offsets.first()==starts[chapter] && toc.any {it.locator.offset==starts[chapter]}
         if(heading){val length=data.text.indexOf('\n').let {if(it<0)data.text.length else it};if(length>0){text.setSpan(RelativeSizeSpan(1.18f),0,length,Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);text.setSpan(StyleSpan(Typeface.BOLD),0,length,Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)}}
         val bodyMetrics=paint.fontMetricsInt
@@ -40,7 +53,14 @@ internal class TxtPaginator(val content:TextContent,val toc:List<Chapter>,val pr
                 fm.top=fm.ascent;fm.bottom=fm.descent
             }
         },0,text.length,Spanned.SPAN_INCLUSIVE_EXCLUSIVE)
-        return StaticLayout.Builder.obtain(text,0,text.length,paint,width.coerceAtLeast(1)).setIncludePad(false).setUseLineSpacingFromFallbacks(false).setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE).build()
+        val builder=StaticLayout.Builder.obtain(text,0,text.length,paint,width.coerceAtLeast(1))
+            .setIncludePad(false)
+            .setUseLineSpacingFromFallbacks(false)
+            // HIGH_QUALITY lets the line breaker weigh the whole paragraph, which
+            // matters for CJK where it otherwise leaves a ragged right edge.
+            .setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY)
+        if(prefs.justify)builder.setJustificationMode(Layout.JUSTIFICATION_MODE_INTER_WORD)
+        return builder.build()
     }
     private fun trailing(layout:StaticLayout,line:Int):Int {
         val e=layout.getLineEnd(line);if(e==0||layout.text[e-1]!='\n')return 0
@@ -52,18 +72,18 @@ internal class TxtPaginator(val content:TextContent,val toc:List<Chapter>,val pr
         while(last+1<layout.lineCount && layout.getLineStart(last+1)<layout.text.length && layout.getLineBottom(last+1)-trailing(layout,last+1)-top<=height)last++
         return last
     }
-    suspend fun page(position:Long,chapter:Int,color:Int):TextPage {
+    suspend fun page(position:Long,chapter:Int,color:Int,highlight:Highlight?=null):TextPage {
         val data=textWindow(content,position,(position+windowSize).coerceAtMost(end(chapter)))
         val full=styled(data,chapter,color);val last=fit(full,0);val stop=full.getLineEnd(last).coerceAtMost(data.text.length)
         val sub=PageText(data.text.substring(0,stop),data.offsets.copyOfRange(0,stop+1))
-        val layout=styled(sub,chapter,color)
+        val layout=styled(sub,chapter,color,highlight)
         return TextPage(layout,data.offsets.first(),data.offsets[stop],full.getLineBottom(last)-trailing(full,last),if(last+1<full.lineCount&&full.getLineStart(last+1)<data.text.length)full.getLineBottom(last+1)-trailing(full,last+1) else null)
     }
     private val indexMutex=Mutex()
     suspend fun index(chapter:Int):LongArray=indexMutex.withLock {buildIndex(chapter)}
     private suspend fun buildIndex(chapter:Int):LongArray {
         indexes[chapter]?.let{return it}
-        val key="p4-v2:${toc.any {it.locator.offset==starts[chapter]}}:${starts[chapter]}:${end(chapter)}:$width:$height:$density:$fontScale:${prefs.fontSize}:${prefs.lineSpacing}:${prefs.paragraphSpacing}:${prefs.fontFile}:${content.encoding}:${content.length}"
+        val key="p4-v2:${toc.any {it.locator.offset==starts[chapter]}}:${starts[chapter]}:${end(chapter)}:$width:$height:$density:$fontScale:${prefs.fontSize}:${prefs.lineSpacing}:${prefs.paragraphSpacing}:${prefs.letterSpacing}:${prefs.justify}:${prefs.fontFile}:${content.encoding}:${content.length}"
         val hash=java.security.MessageDigest.getInstance("SHA-256").digest(key.toByteArray()).joinToString(""){"%02x".format(it)}
         val file=File(cache,"$hash.pages")
         runCatching {DataInputStream(file.inputStream().buffered()).use {input->

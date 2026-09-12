@@ -36,6 +36,8 @@ import local.readapp.core.ReaderPreferences
                         Text("行高 · ${"%.1f".format(prefs.lineSpacing)} 倍字号");Slider(prefs.lineSpacing,{update(prefs.copy(lineSpacing=it))},valueRange=1.2f..2.4f,steps=11)
                         Text("段间距 · ${prefs.paragraphSpacing} dp");Slider(prefs.paragraphSpacing.toFloat(),{update(prefs.copy(paragraphSpacing=it.toInt()))},valueRange=0f..24f,steps=23)
                         Text("页边距 · ${prefs.pageMargin} dp");Slider(prefs.pageMargin.toFloat(),{update(prefs.copy(pageMargin=it.toInt()))},valueRange=8f..40f,steps=31)
+                        Text("字间距 · ${"%.2f".format(prefs.letterSpacing)} 字宽");Slider(prefs.letterSpacing,{update(prefs.copy(letterSpacing=it))},valueRange=0f..0.3f,steps=14)
+                        Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Text("两端对齐",Modifier.weight(1f));Switch(prefs.justify,{update(prefs.copy(justify=it))})}
                     }
                     1->{
                         Row{listOf("paper" to "纸色","light" to "浅色","dark" to "深色","system" to "系统").forEach {(key,label)->TextButton(onClick={update(prefs.copy(theme=key))}){Text((if(prefs.theme==key)"✓ " else "")+label)}}}

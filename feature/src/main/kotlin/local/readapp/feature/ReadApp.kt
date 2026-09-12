@@ -10,6 +10,8 @@ import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -53,6 +55,7 @@ data class IncomingFile(val uri:String,val flags:Int)
     var navigationOpen by remember { mutableStateOf(false) }
     var relinking by remember { mutableStateOf<String?>(null) }
     var settingsOpen by remember { mutableStateOf(false) }
+    var highlight by remember { mutableStateOf<Highlight?>(null) }
     val picker=rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if(result.resultCode==Activity.RESULT_OK) {
             val intent=result.data
@@ -76,7 +79,7 @@ data class IncomingFile(val uri:String,val flags:Int)
         lifecycle.lifecycle.addObserver(observer)
         onDispose { lifecycle.lifecycle.removeObserver(observer); vm.flush() }
     }
-    LaunchedEffect(reader) { if(reader==null) { settingsOpen=false; navigationOpen=false } }
+    LaunchedEffect(reader) { if(reader==null) { settingsOpen=false; navigationOpen=false; highlight=null } }
     ReaderTheme(settings.theme) { AppPalette(settings) {
         val window=(LocalContext.current as Activity).window
         val dark=readerIsDark(settings)
@@ -92,14 +95,17 @@ data class IncomingFile(val uri:String,val flags:Int)
         Surface(Modifier.fillMaxSize()) {
             Box(Modifier.fillMaxSize().safeDrawingPadding()) {
                 if(reader==null) CompositionLocalProvider(LocalImport provides vm::importFiles) { Bookshelf(books,busy!=null,{pick()},vm::open,vm::remove,vm::editBook) }
-                else ReadingAppearance(settings) { if(reader!!.epub!=null) EpubReaderScreen(reader!!,settings,jump,vm::locate,vm::closeReader,{settingsOpen=!settingsOpen},{navigationOpen=true},vm::consumeJump)
-                else ReaderScreen(reader!!,settings,jump,vm::position,vm::closeReader,{settingsOpen=!settingsOpen},{navigationOpen=true},vm::consumeJump) }
+                else ReadingAppearance(settings) { if(reader!!.epub!=null) EpubReaderScreen(reader!!,settings,settingsOpen,highlight,{highlight=null},jump,vm::locate,vm::closeReader,{settingsOpen=!settingsOpen},{navigationOpen=true},vm::consumeJump)
+                else ReaderScreen(reader!!,settings,settingsOpen,highlight,{highlight=null},jump,vm::position,vm::closeReader,{settingsOpen=!settingsOpen},{navigationOpen=true},vm::consumeJump) }
                 if(busy!=null) AlertDialog(onDismissRequest={},title={Text("请稍候")},text={Column { LinearProgressIndicator(Modifier.fillMaxWidth()); Spacer(Modifier.height(16.dp)); Text(busy!!) }},confirmButton={TextButton(onClick=vm::cancelOperation){Text("取消")}})
                 if(message!=null && busy==null) AlertDialog(onDismissRequest=vm::dismissMessage,title={Text(if(broken!=null)"正文暂时无法打开" else "导入结果")},text={Text(message!!)},confirmButton={TextButton(onClick=vm::dismissMessage){Text("知道了")}},dismissButton={ if(broken!=null)TextButton(onClick={vm.dismissMessage(); pick(broken)}){Text("重新选择原文件")} })
                 // Typography is adjustable only inside the reader; leaving the reader
                 // must never strand the panel over the bookshelf.
                 if(settingsOpen && reader!=null) Box(Modifier.align(Alignment.BottomCenter)) { ReaderSettings(settings,reader?.book?.encoding?.takeIf { it.isNotBlank() },vm::updatePreferences,{vm.encoding(it);settingsOpen=false},{settingsOpen=false}) }
-                if(navigationOpen && reader!=null) NavigationSheet(reader!!,settings,bookmarks,{vm.navigate(it);navigationOpen=false},vm::addBookmark,vm::removeBookmark,{navigationOpen=false})
+                if(navigationOpen && reader!=null) NavigationSheet(
+                    reader!!,settings,bookmarks,
+                    {locator,length-> highlight=if(length>0)Highlight(locator.offset,length) else null; vm.navigate(locator); navigationOpen=false },
+                    vm::addBookmark,vm::removeBookmark,{navigationOpen=false})
             }
         }
     }
@@ -119,6 +125,7 @@ data class IncomingFile(val uri:String,val flags:Int)
     var drawerDrag by remember {mutableFloatStateOf(0f)}
     var detail by remember { mutableStateOf<Book?>(null) };var directory by remember {mutableStateOf(false)}
     var query by remember { mutableStateOf("") };var about by remember {mutableStateOf(false)}
+    var searchOpen by remember {mutableStateOf(false)}
     var addOpen by remember {mutableStateOf(false)}
     var license by remember {mutableStateOf<String?>(null)}
     ModalNavigationDrawer(drawerState=drawer,gesturesEnabled=drawer.isOpen,drawerContent={ModalDrawerSheet(Modifier.width(300.dp),drawerContainerColor=MaterialTheme.colorScheme.surface){
@@ -131,13 +138,16 @@ data class IncomingFile(val uri:String,val flags:Int)
 
 
             TextButton(onClick={about=true}){Text("关于与许可")}
-            OutlinedTextField(query,{query=it},label={Text("搜索书名")},singleLine=true)
-            TextButton(onClick={scope.launch{drawer.close()}}){Text("返回书架")}
         }
     }}){
         val shown=books.filter {it.title.contains(query,true)}
         Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(end=8.dp),horizontalArrangement=Arrangement.End){IconButton(onClick={addOpen=true},enabled=!busy,modifier=Modifier.semantics{contentDescription="添加书籍"}){Text("+",fontSize=28.sp,fontWeight=FontWeight.Light)}}
+        Row(Modifier.fillMaxWidth().padding(start=4.dp,end=8.dp),verticalAlignment=Alignment.CenterVertically){
+            IconButton(onClick={searchOpen=!searchOpen;if(!searchOpen)query=""},enabled=!busy,modifier=Modifier.semantics{contentDescription="搜索书名"}){Icon(Icons.Default.Search,null)}
+            Spacer(Modifier.weight(1f))
+            IconButton(onClick={addOpen=true},enabled=!busy,modifier=Modifier.semantics{contentDescription="添加书籍"}){Text("+",fontSize=28.sp,fontWeight=FontWeight.Light)}
+        }
+        if(searchOpen)OutlinedTextField(query,{query=it},modifier=Modifier.fillMaxWidth().padding(horizontal=24.dp),label={Text("搜索书名")},singleLine=true)
         LazyColumn(Modifier.weight(1f).pointerInput(drawer){detectHorizontalDragGestures(onDragStart={drawerDrag=0f},onHorizontalDrag={change,amount->change.consume();drawerDrag+=amount},onDragEnd={if(drawerDrag>60)scope.launch{drawer.open()}})}.semantics {customActions=listOf(CustomAccessibilityAction("打开应用菜单"){scope.launch{drawer.open()};true})},contentPadding=PaddingValues(24.dp)){
             if(books.isEmpty())item { Column(Modifier.fillMaxWidth().padding(vertical=80.dp),horizontalAlignment=Alignment.CenterHorizontally){
                 Text("留一点时间，给阅读。",style=MaterialTheme.typography.titleLarge)
@@ -161,7 +171,7 @@ data class IncomingFile(val uri:String,val flags:Int)
                     }
                 }
             }
-            if(books.isNotEmpty()&&shown.isEmpty())item{Text("没有找到这本书，右滑修改搜索条件")}
+            if(books.isNotEmpty()&&shown.isEmpty())item{Text(if(searchOpen)"没有找到这本书，换个书名试试" else "没有找到这本书")}
         }
     }
     }

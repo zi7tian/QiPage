@@ -93,7 +93,7 @@ class LibraryViewModel(private val repository:BookRepository, private val settin
     fun navigate(locator:Locator){reader.value?.let {locate(it.book.id,locator)};jump.value=JumpRequest(locator)}
     fun consumeJump(){jump.value=null}
     fun addBookmark(title:String){val current=reader.value?:return;viewModelScope.launch {
-        try{persist();repository.addBookmark(current.book.id,title.ifBlank { "阅读书签" },current.book.locator)}
+        try{persist();repository.addBookmark(current.book.id,title.trim(),current.book.locator)}
         catch(e:Exception){if(e is CancellationException)throw e;message.value="书签保存失败"}
     }}
     fun removeBookmark(id:String){viewModelScope.launch { repository.removeBookmark(id) }}

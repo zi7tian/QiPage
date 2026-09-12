@@ -19,7 +19,7 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 private data class TxtFrame(val page:TextPage,val chapter:Int,val number:Int,val count:Int,val bitmap:Bitmap)
-@Composable internal fun ReaderScreen(open:OpenBook,prefs:ReaderPreferences,jump:JumpRequest?,onPosition:(String,Long)->Unit,onBack:()->Unit,onSettings:()->Unit,onNavigation:()->Unit,onJumpHandled:()->Unit){
+@Composable internal fun ReaderScreen(open:OpenBook,prefs:ReaderPreferences,settingsOpen:Boolean,highlight:Highlight?,onClearHighlight:()->Unit,jump:JumpRequest?,onPosition:(String,Long)->Unit,onBack:()->Unit,onSettings:()->Unit,onNavigation:()->Unit,onJumpHandled:()->Unit){
     val content=checkNotNull(open.content);val context=LocalContext.current;val density=LocalDensity.current;val scope=rememberCoroutineScope()
     val latestSettings by rememberUpdatedState(onSettings);val latestPosition by rememberUpdatedState(onPosition)
     val bg=MaterialTheme.colorScheme.surface.toArgb();val ink=MaterialTheme.colorScheme.onSurface.toArgb();val dark=readerIsDark(prefs)
@@ -40,12 +40,12 @@ private data class TxtFrame(val page:TextPage,val chapter:Int,val number:Int,val
                 val margin=with(density){prefs.pageMargin.dp.roundToPx()};val vertical=with(density){4.dp.roundToPx()}
                 val paginator=remember(content,toc,font,w,h,margin,density.density,density.fontScale,prefs.fontSize,prefs.lineSpacing,prefs.paragraphSpacing){TxtPaginator(content,toc,prefs,font,(w-2*margin).coerceAtLeast(1),(h-2*vertical).coerceAtLeast(1),density.density,density.fontScale,File(context.cacheDir,"pagination/${open.book.id}"))}
                 val dim=if(dark)prefs.nightImageDim else 0f
-                val stamp=listOf(paginator,bg,ink,backdrop,dim)
+                val stamp=listOf(paginator,bg,ink,backdrop,dim,highlight)
                 var shownStamp by remember {mutableStateOf<List<Any?>?>(null)}
                 var pending by remember {mutableStateOf<TxtFrame?>(null)};var prepareJob by remember {mutableStateOf<Job?>(null)}
                 suspend fun render(chapter:Int,number:Int):TxtFrame=withContext(Dispatchers.IO){
                     val pages=paginator.index(chapter);val index=number.coerceIn(0,pages.lastIndex)
-                    val page=paginator.page(pages[index],chapter,ink)
+                    val page=paginator.page(pages[index],chapter,ink,highlight)
                     TxtFrame(page,chapter,index+1,pages.size,pageBitmap(page,w,h,margin,bg,backdrop,dim,vertical))
                 }
                 LaunchedEffect(stamp,offset){
@@ -61,9 +61,10 @@ private data class TxtFrame(val page:TextPage,val chapter:Int,val number:Int,val
                     }catch(e:Exception){if(e is CancellationException)throw e;failure="正文分页失败，请返回书架重试。"}
                 }
                 AndroidView(modifier=Modifier.fillMaxSize(),factory={CoverPageView(it).also {view->pager=view}},update={view ->
-                    view.settings={latestSettings()};view.edgeTap=prefs.tapToTurn
+                    view.settings={latestSettings()};view.edgeTap=prefs.tapToTurn;view.settingsOpen=settingsOpen
                     if(frame!=null && view.tag!==frame){view.tag=frame;view.show(frame!!.bitmap,frame!!.page.layout.text.toString())}
                     view.prepare={next,done ->
+                        onClearHighlight()
                         val current=frame
                         if(current==null || shownStamp!=stamp)done(null)
                         else {

@@ -67,6 +67,12 @@ internal class CoverPageView(context:Context):View(context) {
     var settings:(()->Unit)?=null
     var longPress:((Float,Float)->Unit)?=null
     var edgeTap=true
+    /**
+     * While the typography panel is open every tap belongs to it: the first tap
+     * anywhere dismisses the panel instead of turning a page, so the user never
+     * pages away by accident while adjusting settings.
+     */
+    var settingsOpen=false
     private var current:Bitmap?=null
     private var target:Bitmap?=null
     private var active=false
@@ -145,7 +151,8 @@ internal class CoverPageView(context:Context):View(context) {
             MotionEvent.ACTION_UP->{
                 if(active)finish(fraction>=0.18f)
                 else if(kotlin.math.abs(event.x-downX)<slop && kotlin.math.abs(event.y-downY)<slop){
-                    if(event.eventTime-event.downTime>=ViewConfiguration.getLongPressTimeout() && longPress!=null)longPress?.invoke(event.x,event.y)
+                    if(settingsOpen)settings?.invoke()
+                    else if(event.eventTime-event.downTime>=ViewConfiguration.getLongPressTimeout() && longPress!=null)longPress?.invoke(event.x,event.y)
                     else if(event.x in width*.25f..width*.75f && event.y in height*.2f..height*.8f)settings?.invoke()
                     else if(edgeTap && event.x<width*.25f)turn(false) else if(edgeTap && event.x>width*.75f)turn(true)
                     performClick()

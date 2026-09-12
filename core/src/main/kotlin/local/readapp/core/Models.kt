@@ -54,7 +54,9 @@ interface BookRepository {
     suspend fun removeBookmark(id:String)
 }
 data class ReaderPreferences(val fontSize: Int = 20, val theme: String = "paper", val keepScreenOn: Boolean = false,
-    val lineSpacing:Float=1.7f,val paragraphSpacing:Int=8,val pageMargin:Int=24,val chapterRule:String="all",
+    val lineSpacing:Float=1.7f,val paragraphSpacing:Int=8,val pageMargin:Int=24,
+    /** Extra tracking in em units, on top of whatever the typeface ships with. */
+    val letterSpacing:Float=0f,val justify:Boolean=true,val chapterRule:String="all",
     val tapToTurn:Boolean=true,val bookmarksEnabled:Boolean=true,val navigationFirst:Boolean=false,
     val fontFile:String="",val fontName:String="",val backgroundFile:String="",
     val dayBackground:String="",val dayText:String="",val nightBackground:String="",val nightText:String="",
