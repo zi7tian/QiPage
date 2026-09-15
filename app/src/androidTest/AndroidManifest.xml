@@ -1,6 +1,0 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <application>
-        <!-- Test APK only: exposes generated fixtures, never user files. -->
-        <provider android:name="local.readapp.test.FixtureProvider" android:authorities="local.readapp.test.oem.files" android:exported="true" android:grantUriPermissions="true" />
-    </application>
-</manifest>

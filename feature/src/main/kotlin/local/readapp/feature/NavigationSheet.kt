@@ -47,7 +47,8 @@ import kotlin.math.roundToInt
 ) {
     var tab by remember { mutableIntStateOf(0) }
     val toc=open.epub?.toc ?: open.content?.let { selectedChapters(it,prefs) }.orEmpty()
-    val current=remember(open.book.id,open.book.locator,open.book.position,toc){currentChapterIndex(open,toc)}
+    val chapterTitle=LocalReaderChrome.current?.chapter
+    val current=remember(open.book.id,open.book.locator,open.book.position,toc,chapterTitle){if(open.epub!=null && chapterTitle!=null)toc.indexOfFirst{it.title==chapterTitle}.takeIf{it>=0}?:currentChapterIndex(open,toc) else currentChapterIndex(open,toc)}
 
     Dialog(onDismissRequest=close,properties=DialogProperties(usePlatformDefaultWidth=false)) {
         Surface(Modifier.fillMaxSize()) {
@@ -115,7 +116,7 @@ internal fun currentChapterIndex(open:OpenBook,toc:List<Chapter>):Int {
                     Modifier.fillMaxWidth().clickable{navigate(entry.locator,0)}.padding(start=(20+entry.depth.coerceAtMost(4)*16).dp,end=8.dp,top=16.dp,bottom=16.dp),
                     maxLines=3,
                     overflow=TextOverflow.Ellipsis,
-                    color=if(here)MaterialTheme.colorScheme.error else Color.Unspecified,
+                    color=if(here)PaperGold else Color.Unspecified,
                     fontWeight=if(here)FontWeight.SemiBold else null,
                 )
                 if(i<toc.lastIndex)HorizontalDivider()

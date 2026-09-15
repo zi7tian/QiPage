@@ -56,6 +56,29 @@ data class IncomingFile(val uri:String,val flags:Int)
     var relinking by remember { mutableStateOf<String?>(null) }
     var settingsOpen by remember { mutableStateOf(false) }
     var highlight by remember { mutableStateOf<Highlight?>(null) }
+    val chrome=remember { ReaderChrome() }
+    var selection by remember { mutableStateOf<SelectionPage?>(null) }
+    var notesOpen by remember { mutableStateOf(false) }
+    val paperContext=LocalContext.current
+    val paperMemory=remember {paperContext.getSharedPreferences("paper-ui",0)}
+    val activeLifecycle=androidx.lifecycle.compose.LocalLifecycleOwner.current
+    LaunchedEffect(reader?.book?.id,activeLifecycle) {
+        if(reader!=null)activeLifecycle.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+            var last=android.os.SystemClock.elapsedRealtime()
+            while(true){kotlinx.coroutines.delay(1000);val now=android.os.SystemClock.elapsedRealtime();val seconds=(now-last)/1000;last=now
+                paperMemory.edit().putLong("readingSeconds",paperMemory.getLong("readingSeconds",0)+seconds).apply()
+            }
+        }
+    }
+    LaunchedEffect(reader?.book?.id,bookmarks) {
+        val current=reader ?: return@LaunchedEffect
+        paperMemory.getString("pending-note",null)?.let {raw->
+            val j=org.json.JSONObject(raw)
+            if(j.optString("book")==current.book.id){vm.navigate(decodeLocation(j.getJSONObject("locator")));highlight=Highlight(j.getJSONObject("locator").optLong("offset"),j.optInt("length",j.optString("quote").length));paperMemory.edit().remove("pending-note").apply()}
+        }
+        val id=paperMemory.getString("pending-bookmark",null)
+        bookmarks.firstOrNull {it.id==id}?.let {vm.navigate(it.locator);paperMemory.edit().remove("pending-bookmark").apply()}
+    }
     val picker=rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         if(result.resultCode==Activity.RESULT_OK) {
             val intent=result.data
@@ -79,7 +102,7 @@ data class IncomingFile(val uri:String,val flags:Int)
         lifecycle.lifecycle.addObserver(observer)
         onDispose { lifecycle.lifecycle.removeObserver(observer); vm.flush() }
     }
-    LaunchedEffect(reader) { if(reader==null) { settingsOpen=false; navigationOpen=false; highlight=null } }
+    LaunchedEffect(reader) { if(reader==null) { settingsOpen=false; navigationOpen=false; highlight=null; chrome.visible=false; notesOpen=false;selection=null } }
     ReaderTheme(settings.theme) { AppPalette(settings) {
         val window=(LocalContext.current as Activity).window
         val dark=readerIsDark(settings)
@@ -91,12 +114,27 @@ data class IncomingFile(val uri:String,val flags:Int)
             window.navigationBarColor=surface.toArgb()
             val flags=android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
             window.insetsController?.setSystemBarsAppearance(if(surface.luminance()>.5f)flags else 0,flags)
+            window.insetsController?.systemBarsBehavior=android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            window.insetsController?.show(android.view.WindowInsets.Type.statusBars())
+            if(reader!=null)window.insetsController?.hide(android.view.WindowInsets.Type.navigationBars()) else window.insetsController?.show(android.view.WindowInsets.Type.navigationBars())
         }
         Surface(Modifier.fillMaxSize()) {
-            Box(Modifier.fillMaxSize().safeDrawingPadding()) {
-                if(reader==null) CompositionLocalProvider(LocalImport provides vm::importFiles) { Bookshelf(books,busy!=null,{pick()},vm::open,vm::remove,vm::editBook) }
-                else ReadingAppearance(settings) { if(reader!!.epub!=null) EpubReaderScreen(reader!!,settings,settingsOpen,highlight,{highlight=null},jump,vm::locate,vm::closeReader,{settingsOpen=!settingsOpen},{navigationOpen=true},vm::consumeJump)
-                else ReaderScreen(reader!!,settings,settingsOpen,highlight,{highlight=null},jump,vm::position,vm::closeReader,{settingsOpen=!settingsOpen},{navigationOpen=true},vm::consumeJump) }
+            CompositionLocalProvider(LocalReaderChrome provides chrome,LocalSelectPage provides {selection=it},LocalMarkSelection provides {mark->reader?.let{book->
+                val store=paperContext.getSharedPreferences("paper-notes",0);val entries=org.json.JSONArray(store.getString("entries","[]"))
+                entries.put(org.json.JSONObject().put("id",java.util.UUID.randomUUID().toString()).put("book",book.book.id).put("title",book.book.title).put("quote",mark.text).put("length",mark.length).put("note","").put("locator",encodeLocation(mark.locator)).put("created",System.currentTimeMillis()))
+                store.edit().putString("entries",entries.toString()).apply();highlight=Highlight(mark.locator.offset,mark.length);vm.navigate(mark.locator)
+            }}) {
+            Box(Modifier.fillMaxSize().then(if(reader!=null)Modifier.windowInsetsPadding(WindowInsets.statusBars.union(WindowInsets.displayCutout)) else Modifier)) {
+                if(reader==null) CompositionLocalProvider(LocalImport provides vm::importFiles) { PaperBookshelf(books,busy!=null,{pick()},vm::open,vm::remove,vm::editBook,settings,vm::updatePreferences,repository) }
+                else ReadingAppearance(settings) { if(reader!!.epub!=null) EpubReaderScreen(reader!!,settings,settingsOpen,highlight,{highlight=null},jump,vm::locate,vm::closeReader,{if(settingsOpen)settingsOpen=false else chrome.visible=!chrome.visible},{navigationOpen=true},vm::consumeJump)
+                else ReaderScreen(reader!!,settings,settingsOpen,highlight,{highlight=null},jump,vm::position,vm::closeReader,{if(settingsOpen)settingsOpen=false else chrome.visible=!chrome.visible},{navigationOpen=true},vm::consumeJump) }
+                if(reader!=null && !settingsOpen && !navigationOpen)PaperReaderChrome(chrome,reader!!,settings,vm::updatePreferences,vm::closeReader,{navigationOpen=true},{settingsOpen=true},{vm.addBookmark(chrome.chapter.ifBlank {reader!!.book.title})},{notesOpen=true})
+                if(notesOpen && reader!=null)PaperLibraryPanel("书签与笔记",listOf(reader!!.book),settings,vm::updatePreferences,repository,{id->notesOpen=false
+                    val raw=paperMemory.getString("pending-note",null)
+                    if(raw!=null){val j=org.json.JSONObject(raw);val loc=decodeLocation(j.getJSONObject("locator"));vm.navigate(loc);highlight=Highlight(loc.offset,j.optInt("length",j.optString("quote").length));paperMemory.edit().remove("pending-note").apply()}
+                    else{val mark=paperMemory.getString("pending-bookmark",null);bookmarks.firstOrNull{it.id==mark}?.let{vm.navigate(it.locator);paperMemory.edit().remove("pending-bookmark").apply()}}
+                },{notesOpen=false})
+                selection?.let {page->reader?.let {book->SelectionNotebook(page,book.book.id,book.book.title,{locator,length->highlight=Highlight(locator.offset,length);vm.navigate(locator)},{selection=null})}}
                 if(busy!=null) AlertDialog(onDismissRequest={},title={Text("请稍候")},text={Column { LinearProgressIndicator(Modifier.fillMaxWidth()); Spacer(Modifier.height(16.dp)); Text(busy!!) }},confirmButton={TextButton(onClick=vm::cancelOperation){Text("取消")}})
                 if(message!=null && busy==null) AlertDialog(onDismissRequest=vm::dismissMessage,title={Text(if(broken!=null)"正文暂时无法打开" else "导入结果")},text={Text(message!!)},confirmButton={TextButton(onClick=vm::dismissMessage){Text("知道了")}},dismissButton={ if(broken!=null)TextButton(onClick={vm.dismissMessage(); pick(broken)}){Text("重新选择原文件")} })
                 // Typography is adjustable only inside the reader; leaving the reader
@@ -110,7 +148,8 @@ data class IncomingFile(val uri:String,val flags:Int)
         }
     }
     }
-    BackHandler(reader!=null && busy==null && !settingsOpen && !navigationOpen) { vm.closeReader() }
+    BackHandler(reader!=null && busy==null && !settingsOpen && !navigationOpen && !chrome.visible && selection==null && !notesOpen) { vm.closeReader() }
+    }
     val activity=LocalContext.current as Activity
     DisposableEffect(reader!=null,settings.keepScreenOn) {
         if(reader!=null && settings.keepScreenOn)activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -119,73 +158,8 @@ data class IncomingFile(val uri:String,val flags:Int)
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class,ExperimentalMaterial3Api::class)
-@Composable private fun Bookshelf(books:List<Book>,busy:Boolean,onImport:()->Unit,onOpen:(String)->Unit,onRemove:(String)->Unit,onEdit:(String,String,String,String)->Unit) {
-    val drawer=rememberDrawerState(DrawerValue.Closed);val scope=rememberCoroutineScope()
-    var drawerDrag by remember {mutableFloatStateOf(0f)}
-    var detail by remember { mutableStateOf<Book?>(null) };var directory by remember {mutableStateOf(false)}
-    var query by remember { mutableStateOf("") };var about by remember {mutableStateOf(false)}
-    var searchOpen by remember {mutableStateOf(false)}
-    var addOpen by remember {mutableStateOf(false)}
-    var license by remember {mutableStateOf<String?>(null)}
-    ModalNavigationDrawer(drawerState=drawer,gesturesEnabled=drawer.isOpen,drawerContent={ModalDrawerSheet(Modifier.width(300.dp),drawerContainerColor=MaterialTheme.colorScheme.surface){
-        Column(Modifier.padding(24.dp)){
-            Text("栖页",style=MaterialTheme.typography.headlineLarge,fontWeight=FontWeight.SemiBold)
-            Text("QiPage · 0.4.0-p4",color=MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(Modifier.height(24.dp));Text("只在本机，安心阅读。")
-            Text("Android 11 及以上 · TXT / EPUB",style=MaterialTheme.typography.bodySmall)
-            Spacer(Modifier.height(24.dp))
-
-
-            TextButton(onClick={about=true}){Text("关于与许可")}
-        }
-    }}){
-        val shown=books.filter {it.title.contains(query,true)}
-        Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().padding(start=4.dp,end=8.dp),verticalAlignment=Alignment.CenterVertically){
-            IconButton(onClick={searchOpen=!searchOpen;if(!searchOpen)query=""},enabled=!busy,modifier=Modifier.semantics{contentDescription="搜索书名"}){Icon(Icons.Default.Search,null)}
-            Spacer(Modifier.weight(1f))
-            IconButton(onClick={addOpen=true},enabled=!busy,modifier=Modifier.semantics{contentDescription="添加书籍"}){Text("+",fontSize=28.sp,fontWeight=FontWeight.Light)}
-        }
-        if(searchOpen)OutlinedTextField(query,{query=it},modifier=Modifier.fillMaxWidth().padding(horizontal=24.dp),label={Text("搜索书名")},singleLine=true)
-        LazyColumn(Modifier.weight(1f).pointerInput(drawer){detectHorizontalDragGestures(onDragStart={drawerDrag=0f},onHorizontalDrag={change,amount->change.consume();drawerDrag+=amount},onDragEnd={if(drawerDrag>60)scope.launch{drawer.open()}})}.semantics {customActions=listOf(CustomAccessibilityAction("打开应用菜单"){scope.launch{drawer.open()};true})},contentPadding=PaddingValues(24.dp)){
-            if(books.isEmpty())item { Column(Modifier.fillMaxWidth().padding(vertical=80.dp),horizontalAlignment=Alignment.CenterHorizontally){
-                Text("留一点时间，给阅读。",style=MaterialTheme.typography.titleLarge)
-                Spacer(Modifier.height(16.dp));Text("点击右上角 +，添加本机书籍")
-                TextButton(onClick={addOpen=true}){Text("开始阅读")}
-            }}
-            items(shown,key={it.id}){book ->
-                Row(Modifier.fillMaxWidth().combinedClickable(enabled=!busy,onClick={onOpen(book.id)},onLongClick={detail=book},onLongClickLabel="书籍详情").padding(vertical=20.dp),verticalAlignment=Alignment.CenterVertically){
-                    val cover by produceState<ImageBitmap?>(null,book.cover){value=if(book.cover.isBlank())null else withContext(Dispatchers.IO){android.graphics.BitmapFactory.decodeFile(book.cover)?.asImageBitmap()}}
-                    Box(Modifier.size(60.dp,82.dp).clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.surfaceContainer),contentAlignment=Alignment.Center){
-                        if(cover!=null)Image(cover!!,null,Modifier.fillMaxSize(),contentScale=ContentScale.Crop)
-                        else Text(book.title.take(1),style=MaterialTheme.typography.headlineMedium,color=MaterialTheme.colorScheme.primary)
-                    }
-                    Spacer(Modifier.width(20.dp))
-                    Column(Modifier.weight(1f)){
-                        Text(book.title,maxLines=2,overflow=TextOverflow.Ellipsis,style=MaterialTheme.typography.titleMedium)
-                        if(book.author.isNotBlank())Text(book.author,maxLines=1,style=MaterialTheme.typography.bodySmall,color=MaterialTheme.colorScheme.onSurfaceVariant)
-                        Spacer(Modifier.height(8.dp))
-                        val percent=if(book.format=="epub")(book.locator.progression*100).roundToInt() else (book.position*100.0/book.chars.coerceAtLeast(1)).roundToInt()
-                        Text("${book.format.uppercase()} · "+if(book.lastRead==0L)"未开始" else "已读 $percent%",style=MaterialTheme.typography.labelMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
-            }
-            if(books.isNotEmpty()&&shown.isEmpty())item{Text(if(searchOpen)"没有找到这本书，换个书名试试" else "没有找到这本书")}
-        }
-    }
-    }
-    if(addOpen)AlertDialog(onDismissRequest={addOpen=false},title={Text("添加书籍")},text={Column{TextButton(onClick={addOpen=false;onImport()}){Text("选择书籍文件")};TextButton(onClick={addOpen=false;directory=true}){Text("从目录选择")}}},confirmButton={TextButton(onClick={addOpen=false}){Text("取消")}})
-    detail?.let {book ->BookDetails(book,{title,author,description->onEdit(book.id,title,author,description);detail=null},{onRemove(book.id);detail=null},{detail=null})}
-    if(directory)DirectoryImport(LocalImport.current,{directory=false})
-    license?.let {LicenseText(it,{license=null})}
-    if(about)AlertDialog(onDismissRequest={about=false},title={Text("栖页 · QiPage")},text={Column(Modifier.verticalScroll(rememberScrollState())){
-        Text("版本 0.4.0-p4\n仅处理本机电子书，无账号、广告、云同步或网络权限。\n\n右滑书架：应用菜单\n长按书籍：详情与编辑\n左右滑动正文：翻页\n点击正文中央：排版\n\n组件许可：AndroidX / Compose / Room / DataStore（Apache 2.0）；Kotlin / kotlinx.coroutines（Apache 2.0）；Android 系统 WebView（系统提供）。\n\n当前 APK 使用项目本机测试签名，支持覆盖旧版安装。")
-        listOf("NOTICE.txt","Apache-2.0.txt","Desugar-GPL2-Classpath.txt").forEach {file->TextButton(onClick={license=file}){Text(file)}}
-    }},confirmButton={TextButton(onClick={about=false}){Text("关闭")}})
-}
-private val LocalImport=staticCompositionLocalOf<(List<String>,Int)->Unit> { {_,_->} }
-@Composable private fun BookDetails(book:Book,save:(String,String,String)->Unit,remove:()->Unit,close:()->Unit){
+internal val LocalImport=staticCompositionLocalOf<(List<String>,Int)->Unit> { {_,_->} }
+@Composable internal fun BookDetails(book:Book,save:(String,String,String)->Unit,remove:()->Unit,close:()->Unit){
     var title by remember(book.id){mutableStateOf(book.title)};var author by remember(book.id){mutableStateOf(book.author)};var description by remember(book.id){mutableStateOf(book.description)};var confirm by remember{mutableStateOf(false)}
     androidx.compose.ui.window.Dialog(onDismissRequest=close,properties=androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth=false)){
         Surface(Modifier.fillMaxSize()) {Column(Modifier.safeDrawingPadding().padding(24.dp).verticalScroll(rememberScrollState())){
@@ -202,7 +176,7 @@ private val LocalImport=staticCompositionLocalOf<(List<String>,Int)->Unit> { {_,
     if(confirm)AlertDialog(onDismissRequest={confirm=false},title={Text("移出书架？")},text={Text("移除阅读记录和应用内副本，保留手机中的原文件。")},confirmButton={TextButton(onClick=remove){Text("移出")}},dismissButton={TextButton(onClick={confirm=false}){Text("取消")}})
 }
 
-@Composable private fun LicenseText(file:String,close:()->Unit){
+@Composable internal fun LicenseText(file:String,close:()->Unit){
     val context=LocalContext.current
     val license by produceState("",file){value=withContext(Dispatchers.IO){context.assets.open("licenses/$file").bufferedReader().use{it.readText()}}}
     androidx.compose.ui.window.Dialog(onDismissRequest=close,properties=androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth=false)){

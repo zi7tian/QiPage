@@ -32,11 +32,12 @@ import local.readapp.core.ReaderPreferences
             Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(top=8.dp,bottom=16.dp)){
                 when(tab){
                     0->{
-                        Text("字号 · ${prefs.fontSize}");Slider(prefs.fontSize.toFloat(),{update(prefs.copy(fontSize=it.toInt()))},valueRange=14f..32f,steps=17)
-                        Text("行高 · ${"%.1f".format(prefs.lineSpacing)} 倍字号");Slider(prefs.lineSpacing,{update(prefs.copy(lineSpacing=it))},valueRange=1.2f..2.4f,steps=11)
-                        Text("段间距 · ${prefs.paragraphSpacing} dp");Slider(prefs.paragraphSpacing.toFloat(),{update(prefs.copy(paragraphSpacing=it.toInt()))},valueRange=0f..24f,steps=23)
-                        Text("页边距 · ${prefs.pageMargin} dp");Slider(prefs.pageMargin.toFloat(),{update(prefs.copy(pageMargin=it.toInt()))},valueRange=8f..40f,steps=31)
-                        Text("字间距 · ${"%.2f".format(prefs.letterSpacing)} 字宽");Slider(prefs.letterSpacing,{update(prefs.copy(letterSpacing=it))},valueRange=0f..0.3f,steps=14)
+                        Text("字号 · ${prefs.fontSize}");ReadingSlider(prefs.fontSize.toFloat(),{update(prefs.copy(fontSize=it.toInt()))},valueRange=14f..32f)
+                        Text("行高 · ${"%.1f".format(prefs.lineSpacing)} 倍字号");ReadingSlider(prefs.lineSpacing,{update(prefs.copy(lineSpacing=it))},valueRange=1.2f..2.4f)
+                        Text("段间距 · ${prefs.paragraphSpacing} dp");ReadingSlider(prefs.paragraphSpacing.toFloat(),{update(prefs.copy(paragraphSpacing=it.toInt()))},valueRange=0f..24f)
+                        Text("页边距 · ${prefs.pageMargin} dp");ReadingSlider(prefs.pageMargin.toFloat(),{update(prefs.copy(pageMargin=it.toInt()))},valueRange=8f..40f)
+                        Text("翻页方式");Row{listOf("curl" to "仿真","slide" to "平移","cover" to "覆盖").forEach{(key,label)->TextButton(onClick={update(prefs.copy(turnStyle=key))}){Text((if(prefs.turnStyle==key)"✓ " else "")+label)}}}
+                        Text("字间距 · ${"%.2f".format(prefs.letterSpacing)} 字宽");ReadingSlider(prefs.letterSpacing,{update(prefs.copy(letterSpacing=it))},valueRange=0f..0.3f)
                         Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Text("两端对齐",Modifier.weight(1f));Switch(prefs.justify,{update(prefs.copy(justify=it))})}
                     }
                     1->{
@@ -59,4 +60,15 @@ import local.readapp.core.ReaderPreferences
             }
         }
     }
+}
+
+/** Continuous, tick-free controls; only the current value is shown in the label. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable private fun ReadingSlider(value:Float,onValueChange:(Float)->Unit,valueRange:ClosedFloatingPointRange<Float>){
+    var sliding by remember { mutableStateOf(false) }
+    var position by remember { mutableFloatStateOf(value) }
+    LaunchedEffect(value){if(!sliding)position=value}
+    Slider(value=position.coerceIn(valueRange),onValueChange={sliding=true;position=it;onValueChange(it)},onValueChangeFinished={sliding=false;position=value},valueRange=valueRange,
+        thumb={Box(Modifier.size(14.dp).background(MaterialTheme.colorScheme.primary,androidx.compose.foundation.shape.CircleShape))},
+        track={Box(Modifier.fillMaxWidth().height(2.dp).background(MaterialTheme.colorScheme.primary.copy(alpha=.15f))){Box(Modifier.fillMaxWidth(((position-valueRange.start)/(valueRange.endInclusive-valueRange.start)).coerceIn(0f,1f)).fillMaxHeight().background(MaterialTheme.colorScheme.primary))}})
 }

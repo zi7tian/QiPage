@@ -6,6 +6,13 @@ internal data class PageText(val text:String,val offsets:LongArray)
 
 /** A run of book text to paint with a highlight, in source coordinates. */
 internal data class Highlight(val start:Long,val length:Int)
+/** Translate a native selection back through compacted whitespace to source characters. */
+internal fun sourceSelection(offsets:LongArray,start:Int,end:Int,fallback:Long):Highlight {
+    require(start>=0 && end>start)
+    val from=offsets.getOrNull(start)?:fallback
+    val until=offsets.getOrNull(end-1)?.plus(1)?:from+(end-start)
+    return Highlight(from,(until-from).coerceIn(1,Int.MAX_VALUE.toLong()).toInt())
+}
 internal fun compactParagraphs(source:String,start:Long):PageText {
     val text=StringBuilder();val map=ArrayList<Long>();var i=0
     while(i<source.length){
@@ -32,4 +39,3 @@ internal suspend fun textWindow(content:TextContent,start:Long,end:Long):PageTex
     if(text.isNotEmpty() && text.last().isHighSurrogate())text=text.dropLast(1)
     compactParagraphs(text,aligned)
 }
-

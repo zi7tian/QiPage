@@ -54,14 +54,14 @@ interface BookRepository {
     suspend fun removeBookmark(id:String)
 }
 data class ReaderPreferences(val fontSize: Int = 20, val theme: String = "paper", val keepScreenOn: Boolean = false,
-    val lineSpacing:Float=1.7f,val paragraphSpacing:Int=8,val pageMargin:Int=24,
+    val lineSpacing:Float=1.8f,val paragraphSpacing:Int=16,val pageMargin:Int=20,
     /** Extra tracking in em units, on top of whatever the typeface ships with. */
     val letterSpacing:Float=0f,val justify:Boolean=true,val chapterRule:String="all",
-    val tapToTurn:Boolean=true,val bookmarksEnabled:Boolean=true,val navigationFirst:Boolean=false,
+    val tapToTurn:Boolean=true,val bookmarksEnabled:Boolean=true,val navigationFirst:Boolean=true,
     val fontFile:String="",val fontName:String="",val backgroundFile:String="",
     val dayBackground:String="",val dayText:String="",val nightBackground:String="",val nightText:String="",
     val nightImageDim:Float=0.65f,val chapterUnits:String="章回节卷部篇",val chapterSeparator:Boolean=false,
-    val chapterTitleLimit:Int=100,val excludedTitles:String="")
+    val chapterTitleLimit:Int=100,val excludedTitles:String="",val turnStyle:String="curl")
 
 /** Rules only filter bounded heading candidates; no arbitrary regular expressions execute. */
 fun selectedChapters(content:TextContent,prefs:ReaderPreferences):List<Chapter> {

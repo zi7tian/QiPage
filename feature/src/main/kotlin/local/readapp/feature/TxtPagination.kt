@@ -10,9 +10,9 @@ import local.readapp.core.*
 import java.io.*
 import kotlin.math.roundToInt
 
-internal data class TextPage(val layout:StaticLayout,val start:Long,val end:Long,val finalBottom:Int,val nextBottom:Int?)
+internal data class TextPage(val layout:StaticLayout,val start:Long,val end:Long,val finalBottom:Int,val nextBottom:Int?,val offsets:LongArray=longArrayOf())
 
-private const val HIGHLIGHT_COLOR=0x66FFB300
+private const val HIGHLIGHT_COLOR=0x55D4A373
 internal class TxtPaginator(val content:TextContent,val toc:List<Chapter>,val prefs:ReaderPreferences,
     val font:Typeface,val width:Int,val height:Int,val density:Float,val fontScale:Float,private val cache:File) {
     val starts=(listOf(0L)+toc.map {it.locator.offset}).distinct().sorted()
@@ -53,15 +53,16 @@ internal class TxtPaginator(val content:TextContent,val toc:List<Chapter>,val pr
                 fm.top=fm.ascent;fm.bottom=fm.descent
             }
         },0,text.length,Spanned.SPAN_INCLUSIVE_EXCLUSIVE)
-        val builder=StaticLayout.Builder.obtain(text,0,text.length,paint,width.coerceAtLeast(1))
-            .setIncludePad(false)
-            .setUseLineSpacingFromFallbacks(false)
-            // HIGH_QUALITY lets the line breaker weigh the whole paragraph, which
-            // matters for CJK where it otherwise leaves a ragged right edge.
-            .setBreakStrategy(Layout.BREAK_STRATEGY_HIGH_QUALITY)
-        if(prefs.justify)builder.setJustificationMode(Layout.JUSTIFICATION_MODE_INTER_WORD)
-        return builder.build()
+        fun build():StaticLayout {
+            val builder=StaticLayout.Builder.obtain(text,0,text.length,paint,width.coerceAtLeast(1))
+                .setIncludePad(false).setUseLineSpacingFromFallbacks(false)
+                .setBreakStrategy(Layout.BREAK_STRATEGY_SIMPLE)
+            if(prefs.justify)builder.setJustificationMode(Layout.JUSTIFICATION_MODE_INTER_WORD)
+            return builder.build()
+        }
+        return if(prefs.justify)punctuationLayout(text,paint,width,::build) else build()
     }
+
     private fun trailing(layout:StaticLayout,line:Int):Int {
         val e=layout.getLineEnd(line);if(e==0||layout.text[e-1]!='\n')return 0
         val heading=(layout.text as Spanned).getSpans(layout.getLineStart(line),e,RelativeSizeSpan::class.java).isNotEmpty()
@@ -77,13 +78,13 @@ internal class TxtPaginator(val content:TextContent,val toc:List<Chapter>,val pr
         val full=styled(data,chapter,color);val last=fit(full,0);val stop=full.getLineEnd(last).coerceAtMost(data.text.length)
         val sub=PageText(data.text.substring(0,stop),data.offsets.copyOfRange(0,stop+1))
         val layout=styled(sub,chapter,color,highlight)
-        return TextPage(layout,data.offsets.first(),data.offsets[stop],full.getLineBottom(last)-trailing(full,last),if(last+1<full.lineCount&&full.getLineStart(last+1)<data.text.length)full.getLineBottom(last+1)-trailing(full,last+1) else null)
+        return TextPage(layout,data.offsets.first(),data.offsets[stop],full.getLineBottom(last)-trailing(full,last),if(last+1<full.lineCount&&full.getLineStart(last+1)<data.text.length)full.getLineBottom(last+1)-trailing(full,last+1) else null,sub.offsets)
     }
     private val indexMutex=Mutex()
     suspend fun index(chapter:Int):LongArray=indexMutex.withLock {buildIndex(chapter)}
     private suspend fun buildIndex(chapter:Int):LongArray {
         indexes[chapter]?.let{return it}
-        val key="p4-v2:${toc.any {it.locator.offset==starts[chapter]}}:${starts[chapter]}:${end(chapter)}:$width:$height:$density:$fontScale:${prefs.fontSize}:${prefs.lineSpacing}:${prefs.paragraphSpacing}:${prefs.letterSpacing}:${prefs.justify}:${prefs.fontFile}:${content.encoding}:${content.length}"
+        val key="p5-punctuation-v1:${toc.any {it.locator.offset==starts[chapter]}}:${starts[chapter]}:${end(chapter)}:$width:$height:$density:$fontScale:${prefs.fontSize}:${prefs.lineSpacing}:${prefs.paragraphSpacing}:${prefs.letterSpacing}:${prefs.justify}:${prefs.fontFile}:${content.encoding}:${content.length}"
         val hash=java.security.MessageDigest.getInstance("SHA-256").digest(key.toByteArray()).joinToString(""){"%02x".format(it)}
         val file=File(cache,"$hash.pages")
         runCatching {DataInputStream(file.inputStream().buffered()).use {input->

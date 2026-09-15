@@ -19,6 +19,7 @@ gradle/wrapper/gradle-wrapper.jar binary
 *.json           text eol=lf
 *.toml           text eol=lf
 *.properties     text eol=lf
+*.ps1            text eol=crlf
 
 # Binary assets: never diff, never convert.
 *.png            binary

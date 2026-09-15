@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.QiPage" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:colorAccent">#D4A373</item>
+        <item name="android:colorControlActivated">#D4A373</item>
+        <item name="android:colorBackgroundFloating">#F8F6F0</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:fontFamily">sans</item>
+    </style>
+</resources>

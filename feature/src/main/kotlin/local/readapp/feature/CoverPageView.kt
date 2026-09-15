@@ -67,6 +67,7 @@ internal class CoverPageView(context:Context):View(context) {
     var settings:(()->Unit)?=null
     var longPress:((Float,Float)->Unit)?=null
     var edgeTap=true
+    var turnStyle="curl"
     /**
      * While the typography panel is open every tap belongs to it: the first tap
      * anywhere dismisses the panel instead of turning a page, so the user never
@@ -126,11 +127,33 @@ internal class CoverPageView(context:Context):View(context) {
         fun draw(bitmap:Bitmap,x:Float){canvas.drawBitmap(bitmap,null,RectF(x,0f,x+width,height.toFloat()),paint)}
         val adjacent=target
         if(!active || adjacent==null){draw(base,0f);return}
+        if(turnStyle=="slide"){
+            val direction=if(next)-1f else 1f
+            draw(base,direction*width*fraction);draw(adjacent,-direction*width*(1-fraction));return
+        }
+        if(turnStyle=="curl"){
+            drawCurl(canvas,if(next)base else adjacent,if(next)adjacent else base,if(next)fraction else 1-fraction)
+            return
+        }
         val layout=turnLayout(next,fraction,width)
         // Paint the pinned layer first so the arriving layer covers it.
         if(next){draw(adjacent,layout.targetX);draw(base,layout.baseX)}
         else{draw(base,layout.baseX);draw(adjacent,layout.targetX)}
         shadow(canvas,layout.shadowX)
+    }
+    /** Cylindrical fold: clipped front, mirrored translucent back and a shaded curved seam. */
+    private fun drawCurl(canvas:Canvas,front:Bitmap,under:Bitmap,progress:Float){
+        val w=width.toFloat();val h=height.toFloat()
+        canvas.drawBitmap(under,null,RectF(0f,0f,w,h),paint)
+        val edge=w*(1-progress);val radius=(w*.14f*kotlin.math.sin(Math.PI*progress).toFloat()).coerceAtLeast(1f)
+        canvas.save();canvas.clipRect(0f,0f,edge,h);canvas.drawBitmap(front,null,RectF(0f,0f,w,h),paint);canvas.restore()
+        val fold=Path().apply{moveTo(edge,0f);cubicTo(edge-radius*.6f,h*.25f,edge-radius*.6f,h*.75f,edge,h);lineTo(edge+radius,h);cubicTo(edge+radius*.3f,h*.75f,edge+radius*.3f,h*.25f,edge+radius,0f);close()}
+        canvas.save();canvas.clipPath(fold)
+        paint.color=front.getPixel((front.width-1).coerceAtLeast(0),0);canvas.drawPath(fold,paint)
+        canvas.save();canvas.scale(-1f,1f,edge,0f);paint.alpha=32;canvas.drawBitmap(front,0f,0f,paint);paint.alpha=255;canvas.restore()
+        paint.shader=LinearGradient(edge-radius*.4f,0f,edge+radius,0f,intArrayOf(0x50000000,0x08FFFFFF,0x28FFFFFF,0x30000000),floatArrayOf(0f,.35f,.7f,1f),Shader.TileMode.CLAMP)
+        canvas.drawPath(fold,paint);paint.shader=null;paint.color=Color.WHITE;canvas.restore()
+        shadow(canvas,edge+radius)
     }
     /** Soft seam where a moving page overlaps the page underneath. */
     private fun shadow(canvas:Canvas,x:Float){
@@ -167,4 +190,3 @@ internal class CoverPageView(context:Context):View(context) {
     override fun performAccessibilityAction(action:Int,args:android.os.Bundle?):Boolean=when(action){0x01000001->{turn(true);true};0x01000002->{turn(false);true};0x01000003->{settings?.invoke();true};else->super.performAccessibilityAction(action,args)}
     override fun onDetachedFromWindow(){abort();current=null;super.onDetachedFromWindow()}
 }
-

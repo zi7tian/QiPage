@@ -21,6 +21,7 @@ import kotlin.math.roundToInt
 private data class TxtFrame(val page:TextPage,val chapter:Int,val number:Int,val count:Int,val bitmap:Bitmap)
 @Composable internal fun ReaderScreen(open:OpenBook,prefs:ReaderPreferences,settingsOpen:Boolean,highlight:Highlight?,onClearHighlight:()->Unit,jump:JumpRequest?,onPosition:(String,Long)->Unit,onBack:()->Unit,onSettings:()->Unit,onNavigation:()->Unit,onJumpHandled:()->Unit){
     val content=checkNotNull(open.content);val context=LocalContext.current;val density=LocalDensity.current;val scope=rememberCoroutineScope()
+    val chrome=LocalReaderChrome.current;val selectPage=LocalSelectPage.current;val markSelection=LocalMarkSelection.current
     val latestSettings by rememberUpdatedState(onSettings);val latestPosition by rememberUpdatedState(onPosition)
     val bg=MaterialTheme.colorScheme.surface.toArgb();val ink=MaterialTheme.colorScheme.onSurface.toArgb();val dark=readerIsDark(prefs)
     val font by produceState(Typeface.DEFAULT,prefs.fontFile){value=withContext(Dispatchers.IO){runCatching {ReadingAssets.file(context,prefs.fontFile)?.let(Typeface::createFromFile)}.getOrNull()?:Typeface.DEFAULT}}
@@ -38,7 +39,8 @@ private data class TxtFrame(val page:TextPage,val chapter:Int,val number:Int,val
             BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()){
                 val w=with(density){maxWidth.roundToPx()}.coerceAtLeast(1);val h=with(density){maxHeight.roundToPx()}.coerceAtLeast(1)
                 val margin=with(density){prefs.pageMargin.dp.roundToPx()};val vertical=with(density){4.dp.roundToPx()}
-                val paginator=remember(content,toc,font,w,h,margin,density.density,density.fontScale,prefs.fontSize,prefs.lineSpacing,prefs.paragraphSpacing){TxtPaginator(content,toc,prefs,font,(w-2*margin).coerceAtLeast(1),(h-2*vertical).coerceAtLeast(1),density.density,density.fontScale,File(context.cacheDir,"pagination/${open.book.id}"))}
+                val paginator=remember(content,toc,font,w,h,margin,density.density,density.fontScale,prefs.fontSize,prefs.lineSpacing,prefs.paragraphSpacing,prefs.letterSpacing,prefs.justify){TxtPaginator(content,toc,prefs,font,(w-2*margin).coerceAtLeast(1),(h-2*vertical).coerceAtLeast(1),density.density,density.fontScale,File(context.cacheDir,"pagination/${open.book.id}"))}
+                SideEffect {chrome?.seek={number->scope.launch{frame?.let{f->val pages=withContext(Dispatchers.IO){paginator.index(f.chapter)};offset=pages[(number-1).coerceIn(0,pages.lastIndex)]}}}}
                 val dim=if(dark)prefs.nightImageDim else 0f
                 val stamp=listOf(paginator,bg,ink,backdrop,dim,highlight)
                 var shownStamp by remember {mutableStateOf<List<Any?>?>(null)}
@@ -46,6 +48,11 @@ private data class TxtFrame(val page:TextPage,val chapter:Int,val number:Int,val
                 suspend fun render(chapter:Int,number:Int):TxtFrame=withContext(Dispatchers.IO){
                     val pages=paginator.index(chapter);val index=number.coerceIn(0,pages.lastIndex)
                     val page=paginator.page(pages[index],chapter,ink,highlight)
+                    val painted=page.layout.text as? android.text.Spannable
+                    savedHighlights(context,open.book.id).forEach {mark->
+                        val a=page.offsets.indexOfFirst{it>=mark.start};val b=page.offsets.indexOfFirst{it>=mark.start+mark.length}.let{if(it<0)page.layout.text.length else it}
+                        if(a>=0 && b>a && a<page.layout.text.length)painted?.setSpan(android.text.style.BackgroundColorSpan(0x55D4A373),a,b.coerceAtMost(page.layout.text.length),android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                    }
                     TxtFrame(page,chapter,index+1,pages.size,pageBitmap(page,w,h,margin,bg,backdrop,dim,vertical))
                 }
                 LaunchedEffect(stamp,offset){
@@ -60,8 +67,9 @@ private data class TxtFrame(val page:TextPage,val chapter:Int,val number:Int,val
                         val result=render(chapter,index);frame=result;shownStamp=stamp;latestPosition(open.book.id,result.page.start)
                     }catch(e:Exception){if(e is CancellationException)throw e;failure="正文分页失败，请返回书架重试。"}
                 }
-                AndroidView(modifier=Modifier.fillMaxSize(),factory={CoverPageView(it).also {view->pager=view}},update={view ->
-                    view.settings={latestSettings()};view.edgeTap=prefs.tapToTurn;view.settingsOpen=settingsOpen
+                AndroidView(modifier=Modifier.fillMaxSize(),factory={SelectableTxtSurface(it).also {surface->pager=surface.cover}},update={surface ->
+                    val view=surface.cover;surface.marked=markSelection;surface.note=selectPage
+                    view.turnStyle=prefs.turnStyle;view.longPress={x,y->frame?.let{f->surface.select(f.page,margin,vertical,bg,prefs.justify,x,y)}};view.settings={latestSettings()};view.edgeTap=prefs.tapToTurn;view.settingsOpen=settingsOpen || chrome?.visible==true
                     if(frame!=null && view.tag!==frame){view.tag=frame;view.show(frame!!.bitmap,frame!!.page.layout.text.toString())}
                     view.prepare={next,done ->
                         onClearHighlight()
@@ -81,7 +89,7 @@ private data class TxtFrame(val page:TextPage,val chapter:Int,val number:Int,val
                     }
                     view.commit={pending?.let {result->frame=result;pending=null;shownStamp=stamp;offset=result.page.start;latestPosition(open.book.id,result.page.start)}}
                     view.cancelled={prepareJob?.cancel();pending=null}
-                },onRelease={it.abort();prepareJob?.cancel();pager=null})
+                },onRelease={it.dispose();prepareJob?.cancel();pager=null})
                 failure?.let {Text(it,Modifier.padding(20.dp))}
                 if(progressOpen)AlertDialog(onDismissRequest={progressOpen=false},title={Text("章节进度")},text={Column{
                     Text("${requestedPage.roundToInt()} / ${frame?.count?:1}")
@@ -94,18 +102,23 @@ private data class TxtFrame(val page:TextPage,val chapter:Int,val number:Int,val
                     progressOpen=false
                 }}){Text("跳转")}},dismissButton={TextButton(onClick={progressOpen=false}){Text("取消")}})
             }
+            val chapterTitle=toc.lastOrNull{it.locator.offset <= (frame?.page?.start?:offset)}?.title?:open.book.title
+            LaunchedEffect(chapterTitle){context.getSharedPreferences("paper-ui",0).edit().putString("chapter-${open.book.id}",chapterTitle).apply()}
+            SideEffect { chrome?.let {ui->ui.page=frame?.number?:1;ui.count=frame?.count?:1;ui.chapter=chapterTitle
+                ui.select={frame?.let{f->selectPage(SelectionPage(f.page.layout.text.toString(),Locator(offset=f.page.start),f.page.offsets))}}
+            } }
             ReaderFooter(frame?.number?:0,frame?.count?:0,((frame?.page?.end?:offset)*100.0/content.length.coerceAtLeast(1)),prefs,onNavigation,{requestedPage=(frame?.number?:1).toFloat();fraction=(offset.toDouble()/content.length.coerceAtLeast(1)).toFloat();wholeJump=false;progressOpen=true})
         }
     }
 }
 internal fun progressLabel(page:Int,count:Int,whole:Double)=if(count>0)String.format(Locale.ROOT,"%d/%d %.1f%%",page.coerceIn(1,count),count,whole.coerceIn(0.0,100.0)) else "—/— "+String.format(Locale.ROOT,"%.1f%%",whole.coerceIn(0.0,100.0))
 @Composable internal fun ReaderFooter(page:Int,count:Int,whole:Double,prefs:ReaderPreferences,navigation:()->Unit,progress:()->Unit){
-    Row(Modifier.fillMaxWidth().padding(horizontal=8.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically){
-        if(prefs.navigationFirst)TextButton(onClick=navigation){Text(if(prefs.bookmarksEnabled)"目录 / 书签" else "目录")}
-        if(prefs.navigationFirst)Spacer(Modifier.weight(1f))
-        TextButton(onClick=progress,contentPadding=PaddingValues(horizontal=4.dp)){Text(progressLabel(page,count,whole),style=MaterialTheme.typography.labelMedium)}
-        if(!prefs.navigationFirst)Spacer(Modifier.weight(1f))
-        if(!prefs.navigationFirst)TextButton(onClick=navigation){Text(if(prefs.bookmarksEnabled)"目录 / 书签" else "目录")}
+    val chrome=LocalReaderChrome.current
+    val context=LocalContext.current
+    val title=chrome?.chapter.orEmpty()
+    SideEffect {chrome?.progress=progress}
+    Row(Modifier.fillMaxWidth().padding(horizontal=20.dp,vertical=10.dp),verticalAlignment=androidx.compose.ui.Alignment.CenterVertically){
+        Text(title,Modifier.weight(1f),fontSize=androidx.compose.ui.unit.TextUnit(10f,androidx.compose.ui.unit.TextUnitType.Sp),maxLines=1,overflow=androidx.compose.ui.text.style.TextOverflow.Ellipsis,color=MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(String.format(Locale.ROOT,"%.1f%%",whole),fontSize=androidx.compose.ui.unit.TextUnit(10f,androidx.compose.ui.unit.TextUnitType.Sp),color=MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
-

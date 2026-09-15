@@ -55,6 +55,10 @@ class SafeEpubEngine:EpubEngine {
                 if(Thread.currentThread().isInterrupted)throw InterruptedIOException("Cancelled")
                 if(node.nodeType==Node.TEXT_NODE || node.nodeType==Node.CDATA_SECTION_NODE){
                     val value=node.nodeValue.orEmpty()
+                    // Formatting whitespace between blocks is not a paragraph. Keep
+                    // source offsets stable while removing its phantom line box.
+                    val parent=(node.parentNode as? Element)?.let{(it.localName?:it.tagName).lowercase()}
+                    if(value.isBlank() && parent in setOf("body","div","section","article","ul","ol","table","tbody","tr")){offset+=value.length;return}
                     if(value.isNotEmpty()){output.append("<span data-read=\"").append(offset).append("\" id=\"read-").append(offset).append("\">").append(escape(value)).append("</span>");offset+=value.length}
                     return
                 }

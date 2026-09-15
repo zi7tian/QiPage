@@ -22,12 +22,13 @@ import org.json.JSONTokener
 import java.io.ByteArrayInputStream
 import kotlin.math.roundToInt
 
-private data class EpubFrame(val locator:Locator,val page:Int,val count:Int,val section:Int,val sectionEnd:Int,val bitmap:Bitmap,val text:String)
+private data class EpubFrame(val locator:Locator,val page:Int,val count:Int,val section:Int,val sectionEnd:Int,val bitmap:Bitmap,val text:String,val offsets:LongArray,val chapterTitle:String)
 private data class EpubStyle(val prefs:ReaderPreferences,val bg:Int,val fg:Int,val accent:Int,val scale:Float,val width:Float,val height:Float,val dark:Boolean)
 private data class LocalPage(val url:String,val html:String,val font:java.io.File?,val background:java.io.File?)
 private fun cssColor(color:Int)="#"+Integer.toHexString(color and 0xffffff).padStart(6,'0')
 
 @Composable internal fun EpubReaderScreen(open:OpenBook,prefs:ReaderPreferences,settingsOpen:Boolean,highlight:Highlight?,onClearHighlight:()->Unit,jump:JumpRequest?,locate:(String,Locator)->Unit,onBack:()->Unit,onSettings:()->Unit,onNavigation:()->Unit,onJumpHandled:()->Unit){
+    val chrome=LocalReaderChrome.current;val selectPage=LocalSelectPage.current;val markSelection=LocalMarkSelection.current
     val book=checkNotNull(open.epub);val scope=rememberCoroutineScope();val density=LocalDensity.current
     val latestLocate by rememberUpdatedState(locate);val latestSettings by rememberUpdatedState(onSettings)
     val colors=MaterialTheme.colorScheme;val dark=readerIsDark(prefs)
@@ -40,14 +41,16 @@ private fun cssColor(color:Int)="#"+Integer.toHexString(color and 0xffffff).padS
         Column(Modifier.fillMaxSize()){
             BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()){
                 val style=EpubStyle(prefs,colors.surface.toArgb(),colors.onSurface.toArgb(),colors.primary.toArgb(),density.fontScale,maxWidth.value,maxHeight.value,dark)
-                AndroidView(modifier=Modifier.fillMaxSize(),factory={EpubSurface(it,book,scope).also {s->surface=s}},update={s->
+                AndroidView(modifier=Modifier.fillMaxSize(),factory={EpubSurface(it,book,scope,open.book.id).also {s->surface=s}},update={s->
                     s.changed={f->frame=f;error=null;latestLocate(open.book.id,f.locator)}
-                    s.failed={error=it};s.cover.settings={latestSettings()};s.cover.edgeTap=prefs.tapToTurn;s.cover.settingsOpen=settingsOpen
+                    s.failed={error=it};s.cover.settings={latestSettings()};s.cover.edgeTap=prefs.tapToTurn;s.cover.settingsOpen=settingsOpen || chrome?.visible==true;s.cover.turnStyle=prefs.turnStyle;s.selection={f->selectPage(SelectionPage(f.text,f.locator,f.offsets))};s.note=selectPage;s.marked=markSelection
                     s.highlight=highlight;s.onTurn=onClearHighlight
                     s.configure(style,frame?.locator?:first)
                 },onRelease={it.dispose();surface=null})
                 error?.let {Text(it)}
             }
+            LaunchedEffect(frame?.chapterTitle){surface?.context?.getSharedPreferences("paper-ui",0)?.edit()?.putString("chapter-${open.book.id}",frame?.chapterTitle?.ifBlank{open.book.title}?:open.book.title)?.apply()}
+            SideEffect {chrome?.let{ui->ui.page=frame?.let{it.page-it.section+1}?:1;ui.count=frame?.let{it.sectionEnd-it.section}?:1;ui.chapter=frame?.chapterTitle?.ifBlank{open.book.title}?:open.book.title;ui.seek={n->surface?.seek((frame?.section?:0)+n-1)};ui.select={frame?.let{selectPage(SelectionPage(it.text,it.locator,it.offsets))}}}}
             ReaderFooter(frame?.let {it.page-it.section+1}?:0,frame?.let {it.sectionEnd-it.section}?:0,(frame?.locator?.progression?:first.progression)*100,prefs,onNavigation,{target=(frame?.let {it.page-it.section+1}?:1).toFloat();progress=true})
         }
         LaunchedEffect(jump,surface){jump?.locator?.takeIf {it.format=="epub"}?.let {surface?.jump(it);onJumpHandled()}}
@@ -60,16 +63,22 @@ private fun cssColor(color:Int)="#"+Integer.toHexString(color and 0xffffff).padS
 
 /** The opaque cover holds the last completed frame while WebView lays out the target underneath. */
 @SuppressLint("SetJavaScriptEnabled")
-private class EpubSurface(context:Context,val book:EpubContent,val scope:CoroutineScope):FrameLayout(context){
+private class EpubSurface(context:Context,val book:EpubContent,val scope:CoroutineScope,val bookId:String):FrameLayout(context){
     val cover=CoverPageView(context)
-    private val web=WebView(context)
+    private val web=PaperWebView(context)
     var changed:((EpubFrame)->Unit)?=null;var failed:((String)->Unit)?=null
     private val local=java.util.concurrent.atomic.AtomicReference<LocalPage?>(null)
     private var style:EpubStyle?=null;private var generation=0L;private var job:Job?=null
     private var loaded="";private var finished:(()->Unit)?=null
     private var current:EpubFrame?=null;private var pending:EpubFrame?=null
+    private var destination:Locator?=null
+    private var selecting=false
+    private var deferredStyle:EpubStyle?=null
     var highlight:Highlight?=null
     var onTurn:(()->Unit)?=null
+    var selection:((EpubFrame)->Unit)?=null
+    var note:((SelectionPage)->Unit)?=null
+    var marked:((MarkSelection)->Unit)?=null
     private val paths=book.chapters.map {it.path}
     init {
         addView(web,LayoutParams(-1,-1));addView(cover,LayoutParams(-1,-1))
@@ -108,7 +117,19 @@ private class EpubSurface(context:Context,val book:EpubContent,val scope:Corouti
         cover.longPress={x,y->
             val token=generation;val d=resources.displayMetrics.density
             web.evaluateJavascript("(function(){var e=document.elementFromPoint(${x/d},${y/d}),a=e&&e.closest('a');return a?a.getAttribute('href'):null;})()"){raw->
-                if(token==generation){val ref=runCatching {JSONTokener(raw).nextValue() as? String}.getOrNull();if(ref==null||!followLink(ref))cover.settings?.invoke()}
+                if(token==generation){val ref=runCatching {JSONTokener(raw).nextValue() as? String}.getOrNull();if(ref==null||!followLink(ref))beginSelection(x,y)}
+            }
+        }
+        web.selectionClosed={web.evaluateJavascript("window.getSelection().removeAllRanges()",null);endSelection()}
+        web.selectionAction={action,finish->
+            web.evaluateJavascript("""(function(){var s=window.getSelection();if(!s.rangeCount||s.isCollapsed)return null;var r=s.getRangeAt(0);function offset(n,k){var el=(n.nodeType===3?n.parentElement:n).closest('span[data-read]');if(!el)return null;var t=document.createRange();t.setStart(el,0);t.setEnd(n,k);return Number(el.getAttribute('data-read'))+t.toString().length;}return JSON.stringify({text:s.toString(),start:offset(r.startContainer,r.startOffset),end:offset(r.endContainer,r.endOffset)});})()"""){raw->
+                runCatching{val j=JSONObject(JSONTokener(raw).nextValue() as String);val text=j.optString("text");val start=j.getLong("start");val end=j.getLong("end");val frame=current
+                    if(frame!=null&&text.isNotEmpty()&&end>start){val locator=frame.locator.copy(offset=start,anchor="")
+                        if(action==9103){(context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(android.content.ClipData.newPlainText("摘录",text))}
+                        else if(action==9102){val map=LongArray(text.length){start+it};map[map.lastIndex]=end-1;note?.invoke(SelectionPage(text,locator,map,true))}
+                        else marked?.invoke(MarkSelection(text,locator,(end-start).toInt()))
+                    }
+                };finish()
             }
         }
         cover.prepare=prepare@{next,done->
@@ -123,20 +144,35 @@ private class EpubSurface(context:Context,val book:EpubContent,val scope:Corouti
         cover.commit={pending?.let {current=it;pending=null;cover.show(it.bitmap,it.text);changed?.invoke(it)}}
         cover.cancelled={pending=null;current?.let {render(it.locator,it.page){ /* restore hidden renderer without changing the saved position */ }}}
     }
+    private fun beginSelection(x:Float,y:Float){
+        selecting=true;cover.visibility=View.INVISIBLE
+        val now=android.os.SystemClock.uptimeMillis();val down=android.view.MotionEvent.obtain(now,now,android.view.MotionEvent.ACTION_DOWN,x,y,0);down.source=android.view.InputDevice.SOURCE_TOUCHSCREEN;web.dispatchTouchEvent(down);down.recycle()
+        web.postDelayed({val up=android.view.MotionEvent.obtain(now,android.os.SystemClock.uptimeMillis(),android.view.MotionEvent.ACTION_UP,x,y,0);up.source=android.view.InputDevice.SOURCE_TOUCHSCREEN;web.dispatchTouchEvent(up);up.recycle();web.evaluateJavascript("window.getSelection().toString().length"){length->if(length=="0")endSelection()}},(android.view.ViewConfiguration.getLongPressTimeout()+350).toLong())
+    }
+    private fun endSelection(){
+        selecting=false;cover.visibility=View.VISIBLE
+        val next=deferredStyle;deferredStyle=null
+        if(next!=null)current?.let{configure(next,destination?:it.locator)}
+    }
     private fun followLink(ref:String):Boolean {
         val uri=Uri.parse(ref);val path=uri.path.orEmpty().removePrefix("/")
         if(uri.scheme!="https"||uri.host!="reader.invalid"||uri.port != -1||uri.userInfo!=null||uri.query!=null||path !in paths)return false
         jump(Locator(format="epub",href=path,anchor=uri.fragment.orEmpty()));return true
     }
     fun configure(value:EpubStyle,locator:Locator){
+        // Native selection can reveal system bars. Rebuilding the HTML at that
+        // moment clears Chromium's live selection and dismisses its toolbar.
+        if(selecting){deferredStyle=value;return}
         cover.setBackgroundColor(value.bg)
         // UI-only preferences must not repaginate or interrupt a gesture.
         val old=style
         style=value
-        fun key(s:EpubStyle)=listOf(s.bg,s.fg,s.scale,s.width,s.height,s.dark,s.prefs.fontSize,s.prefs.lineSpacing,s.prefs.paragraphSpacing,s.prefs.pageMargin,s.prefs.fontFile,s.prefs.backgroundFile,s.prefs.nightImageDim)
-        if(old==null||key(old)!=key(value)){loaded="";jump(locator)}
+        fun key(s:EpubStyle)=listOf(s.bg,s.fg,s.scale,s.width,s.height,s.dark,s.prefs.fontSize,s.prefs.lineSpacing,s.prefs.paragraphSpacing,s.prefs.pageMargin,s.prefs.fontFile,s.prefs.backgroundFile,s.prefs.nightImageDim,s.prefs.letterSpacing,s.prefs.justify)
+        // Dialog/system-bar changes can resize the viewport while a TOC jump is rendering.
+        // Keep its destination until a completed frame replaces the old page.
+        if(old==null||key(old)!=key(value)){loaded="";jump(destination?:locator)}
     }
-    fun jump(locator:Locator){if(locator.href !in paths)return;cover.abort();pending=null;render(locator,null){current=it;cover.show(it.bitmap,it.text);changed?.invoke(it)}}
+    fun jump(locator:Locator){if(locator.href !in paths)return;destination=locator;cover.abort();pending=null;render(locator,null){destination=null;current=it;cover.show(it.bitmap,it.text);changed?.invoke(it)}}
     fun seek(page:Int){current?.let {f->cover.abort();render(f.locator,page){current=it;cover.show(it.bitmap,it.text);changed?.invoke(it)}}}
     private fun render(locator:Locator,page:Int?,done:(EpubFrame)->Unit){
         val s=style?:return;val token=++generation;job?.cancel()
@@ -151,7 +187,7 @@ private class EpubSurface(context:Context,val book:EpubContent,val scope:Corouti
                         val bitmap=Bitmap.createBitmap(web.width,web.height,Bitmap.Config.ARGB_8888);web.draw(Canvas(bitmap))
                         val count=json.optInt("count",1).coerceAtLeast(1);val p=json.optInt("page").coerceIn(0,count-1)
                         val l=Locator(format="epub",href=locator.href,offset=json.optLong("offset"),anchor=json.optString("anchor"),progression=(paths.indexOf(locator.href)+(p+1.0)/count)/paths.size)
-                        done(EpubFrame(l,p,count,json.optInt("section"),json.optInt("sectionEnd",count),bitmap,json.optString("text").ifBlank {book.chapters[paths.indexOf(locator.href)].title}))
+                        done(EpubFrame(l,p,count,json.optInt("section"),json.optInt("sectionEnd",count),bitmap,json.optString("text").ifBlank {book.chapters[paths.indexOf(locator.href)].title},json.optJSONArray("offsets")?.let{a->LongArray(a.length()){a.optLong(it)}}?:longArrayOf(),json.optString("chapter")))
                     }})
                 }.onFailure {failed?.invoke("正文分页失败，请返回书架重试。")}
             }
@@ -161,18 +197,20 @@ private class EpubSurface(context:Context,val book:EpubContent,val scope:Corouti
             web.evaluateJavascript("!document.fonts || document.fonts.status==='loaded'"){ready->
                 if(token!=generation)return@evaluateJavascript
                 if(ready!="true"&&attempt<100)web.postDelayed({restore(attempt+1)},50)
-                else web.evaluateJavascript(restoreScript(locator)){
+                else web.evaluateJavascript(EPUB_PUNCTUATION_JS+";"+restoreScript(locator)){
                     if(token!=generation)return@evaluateJavascript
                     val capture={
                         if(token==generation){
-                            if(page==null)snapshot() else web.evaluateJavascript("(function(){var e=document.getElementById('pages'),m=${LAST_CONTENT_PAGE_JS},p=Math.min(m,Math.max(0,$page));e.dataset.page=p;document.getElementById('viewport').scrollLeft=p*innerWidth;})()"){snapshot()}
+                            if(page==null)snapshot() else web.evaluateJavascript("(function(){var e=document.getElementById('pages'),m=${LAST_CONTENT_PAGE_JS},p=${nearestContentPageJs("Math.min(m,Math.max(0,$page))")};e.dataset.page=p;document.getElementById('viewport').scrollLeft=p*innerWidth;})()"){snapshot()}
                         }
                     }
                     // Paint the match before the page is captured, otherwise the
                     // screenshot used for the frame would not show it.
                     val hl=highlight
-                    if(hl!=null&&hl.length>0)web.evaluateJavascript(highlightScript(hl.start,hl.length)){capture()}
-                    else capture()
+                    val annotations=savedHighlights(context,bookId,locator.href)
+                    val ranges=(annotations+listOfNotNull(hl)).distinct().filter{it.length>0}
+                    val scripts=if(ranges.isEmpty())"" else highlightRangesScript(ranges)
+                    if(scripts.isNotBlank())web.evaluateJavascript(scripts+";"+EPUB_PUNCTUATION_JS){capture()} else capture()
                 }
             }
         }
@@ -191,7 +229,7 @@ private class EpubSurface(context:Context,val book:EpubContent,val scope:Corouti
 }
 internal fun document(body:String,prefs:ReaderPreferences,bg:Int,fg:Int,accent:Int,scale:Float,viewportWidth:Float,viewportHeight:Float,dark:Boolean):String="""<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=1,maximum-scale=1,user-scalable=no"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https://reader.invalid https://qipage.invalid; font-src https://qipage.invalid; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"><style>
 @font-face{font-family:QiPageLocal;src:url(https://qipage.invalid/font)}
-html,body{background:${cssColor(bg)};color:${cssColor(fg)};margin:0;padding:0;overflow:hidden;height:${viewportHeight}px;width:${viewportWidth}px}body{overflow:hidden}#viewport{position:relative;overflow:hidden;width:${viewportWidth}px;height:${viewportHeight}px;background:${cssColor(bg)};${if(prefs.backgroundFile.isNotEmpty())"background-image:linear-gradient(rgba(0,0,0,${if(dark)prefs.nightImageDim else 0f}),rgba(0,0,0,${if(dark)prefs.nightImageDim else 0f})),url(https://qipage.invalid/background);background-size:cover;background-position:center;" else ""}}#extent{position:absolute;width:1px;height:1px;top:0}#pages{overflow:visible;overflow-wrap:break-word;word-break:normal;line-break:strict;text-align:${if(prefs.justify)"justify" else "start"};letter-spacing:${prefs.letterSpacing}em;font-family:${if(prefs.fontFile.isNotEmpty())"QiPageLocal,system-ui,sans-serif" else "system-ui,sans-serif"};font-size:${prefs.fontSize*scale}px;line-height:${prefs.fontSize*scale*prefs.lineSpacing}px;margin:4px ${prefs.pageMargin}px;width:${(viewportWidth-prefs.pageMargin*2).coerceAtLeast(1f)}px;height:${(viewportHeight-8).coerceAtLeast(64f)}px;column-width:${(viewportWidth-prefs.pageMargin*2).coerceAtLeast(1f)}px;column-count:1;column-gap:${prefs.pageMargin*2}px;column-fill:auto}p{margin:0 0 ${prefs.paragraphSpacing}px;text-indent:2em}p:empty{display:none}p>img:first-child{margin-left:-2em}#pages>:last-child{margin-bottom:0}h1,h2,h3,h4,h5,h6{font-weight:700;text-align:left;line-height:1.25;margin:0 0 ${prefs.paragraphSpacing+6}px;break-after:avoid}h1,h2,h3{break-before:column}h1,h2,h3,h4,h5,h6{font-size:1.18em}img{max-width:100%;max-height:${(viewportHeight-32).coerceAtLeast(32f)}px;object-fit:contain;height:auto;break-inside:avoid}a{color:${cssColor(accent)}}mark.qp-hl{background:#66FFB300;color:inherit}pre{white-space:pre-wrap}table{max-width:100%;border-collapse:collapse}td,th{border:1px solid;padding:4px}blockquote{margin:0 0 ${prefs.paragraphSpacing}px;padding-left:16px;border-left:2px solid}*{box-sizing:border-box;orphans:1;widows:1}</style></head><body><div id="viewport"><div id="pages">$body</div><div id="extent"></div></div></body></html>"""
+html,body{background:${cssColor(bg)};color:${cssColor(fg)};margin:0;padding:0;overflow:hidden;height:${viewportHeight}px;width:${viewportWidth}px}body{overflow:hidden}#viewport{position:relative;overflow:hidden;width:${viewportWidth}px;height:${viewportHeight}px;background:${cssColor(bg)};${if(prefs.backgroundFile.isNotEmpty())"background-image:linear-gradient(rgba(0,0,0,${if(dark)prefs.nightImageDim else 0f}),rgba(0,0,0,${if(dark)prefs.nightImageDim else 0f})),url(https://qipage.invalid/background);background-size:cover;background-position:center;" else ""}}#extent{position:absolute;width:1px;height:1px;top:0}#pages{overflow:visible;overflow-wrap:break-word;word-break:normal;line-break:strict;text-align:${if(prefs.justify)"justify" else "start"};letter-spacing:${prefs.letterSpacing}em;font-family:${if(prefs.fontFile.isNotEmpty())"QiPageLocal,system-ui,sans-serif" else "system-ui,sans-serif"};font-size:${prefs.fontSize*scale}px;line-height:${prefs.fontSize*scale*prefs.lineSpacing}px;margin:4px ${prefs.pageMargin}px;width:${(viewportWidth-prefs.pageMargin*2).coerceAtLeast(1f)}px;height:${(viewportHeight-8).coerceAtLeast(64f)}px;column-width:${(viewportWidth-prefs.pageMargin*2).coerceAtLeast(1f)}px;column-count:1;column-gap:${prefs.pageMargin*2}px;column-fill:auto}p{margin:0 0 ${prefs.paragraphSpacing}px;text-indent:2em}p:empty{display:none}p>img:first-child{margin-left:-2em}#pages>:last-child{margin-bottom:0}h1,h2,h3,h4,h5,h6{font-weight:700;text-align:left;line-height:1.25;margin:0 0 ${prefs.paragraphSpacing+6}px;break-after:avoid}h1,h2,h3{break-before:column}#pages>h1:first-child,#pages>h2:first-child,#pages>h3:first-child{break-before:auto}h1,h2,h3,h4,h5,h6{font-size:1.18em}img{max-width:100%;max-height:${(viewportHeight-32).coerceAtLeast(32f)}px;object-fit:contain;height:auto;break-inside:avoid}a{color:${cssColor(accent)}}mark.qp-hl{background:rgba(212,163,115,.35);color:inherit}pre{white-space:pre-wrap}table{max-width:100%;border-collapse:collapse}td,th{border:1px solid;padding:4px}blockquote{margin:0 0 ${prefs.paragraphSpacing}px;padding-left:16px;border-left:2px solid}*{box-sizing:border-box;orphans:1;widows:1}</style></head><body><div id="viewport"><div id="pages">$body</div><div id="extent"></div></div></body></html>"""
 /**
  * JS expression evaluating to the index of the last column that actually holds
  * content.
@@ -212,17 +250,25 @@ html,body{background:${cssColor(bg)};color:${cssColor(fg)};margin:0;padding:0;ov
  * it. This walks the child fragments, then takes the target column if it has
  * content, else the closest one that does.
  */
-internal fun nearestContentPageJs(target:String):String="""(function(){var pages=document.getElementById('pages'),W=innerWidth,m=parseFloat(getComputedStyle(pages).marginLeft),total=Math.max(1,Math.ceil((pages.scrollWidth+m*2)/W)),has=[],i;for(i=0;i<total;i++)has.push(false);var kids=pages.children;for(i=0;i<kids.length;i++){var rs=kids[i].getClientRects();for(var j=0;j<rs.length;j++){var r=rs[j];if(r.width<=0||r.height<=0)continue;var c=Math.floor(r.left/W);if(c>=0&&c<total)has[c]=true;}}var t=Math.round($target);if(t<0)t=0;if(t>=total)t=total-1;if(has[t])return t;for(var d=1;d<total;d++){if(t+d<total&&has[t+d])return t+d;if(t-d>=0&&has[t-d])return t-d;}return t;})()"""
+internal fun nearestContentPageJs(target:String):String="""(function(){var columns=${CONTENT_COLUMNS_JS},has=columns.has,total=has.length,t=Math.max(0,Math.min(total-1,Math.round($target)));if(has[t])return t;for(var d=1;d<total;d++){if(t+d<total&&has[t+d])return t+d;if(t-d>=0&&has[t-d])return t-d;}return 0;})()"""
+
+internal const val CONTENT_COLUMNS_JS="""(function(){var root=document.getElementById('pages'),sl=document.getElementById('viewport').scrollLeft,has=[false],right=0;function take(rs){for(var j=0;j<rs.length;j++){var r=rs[j];if(r.width<=0||r.height<=0)continue;var x=r.right+sl,c=Math.max(0,Math.floor((r.left+sl)/innerWidth));while(has.length<=c)has.push(false);has[c]=true;right=Math.max(right,x);}}var walk=document.createTreeWalker(root,NodeFilter.SHOW_TEXT),n;while(n=walk.nextNode()){var t=n.nodeValue,a=t.search(/[^\s\u00a0\u200b]/);if(a<0)continue;var b=t.length;while(b>a&&/[\s\u00a0\u200b]/.test(t[b-1]))b--;var range=document.createRange();range.setStart(n,a);range.setEnd(n,b);take(range.getClientRects());}var images=root.querySelectorAll('img,hr');for(var i=0;i<images.length;i++)take(images[i].getClientRects());return {has:has,right:right};})()"""
+
 
 /** Wraps one match in `<mark class="qp-hl">` so the reader can see it. */
+internal fun highlightRangesScript(ranges:List<Highlight>):String {
+    val encoded=ranges.joinToString(","){"[${it.start},${it.start+it.length}]"}
+    return """(function(){var ranges=[$encoded],nodes=document.querySelectorAll('#pages span[data-read]');for(var i=0;i<nodes.length;i++){var el=nodes[i],text=el.textContent,base=Number(el.getAttribute('data-read')),hits=[],cuts=[0,text.length];for(var j=0;j<ranges.length;j++){var a=Math.max(0,ranges[j][0]-base),b=Math.min(text.length,ranges[j][1]-base);if(b>a){hits.push([a,b]);cuts.push(a,b);}}if(!hits.length)continue;cuts.sort(function(a,b){return a-b;});while(el.firstChild)el.removeChild(el.firstChild);for(var k=0;k<cuts.length-1;k++){var a=cuts[k],b=cuts[k+1];if(b<=a)continue;var node=document.createTextNode(text.substring(a,b)),marked=false;for(var j=0;j<hits.length;j++)if(a>=hits[j][0]&&b<=hits[j][1])marked=true;if(marked){var m=document.createElement('mark');m.className='qp-hl';m.appendChild(node);el.appendChild(m);}else el.appendChild(node);}}return 1;})()"""
+}
+
 internal fun highlightScript(start:Long,length:Int):String="""(function(){var t=$start,n=$length,list=document.querySelectorAll('#pages span[data-read]'),i;for(i=0;i<list.length;i++){var el=list[i],o=Number(el.getAttribute('data-read')),txt=el.firstChild;if(!txt||txt.nodeType!==3)continue;if(o+txt.length<=t||o>=t+n)continue;var a=Math.max(0,t-o),b=Math.min(txt.length,t+n-o);if(b<=a)continue;var r=document.createRange();r.setStart(txt,a);r.setEnd(txt,b);var mk=document.createElement('mark');mk.className='qp-hl';try{r.surroundContents(mk);}catch(e){}}return 1;})()"""
 
 /** Drops any previous highlight, restoring the plain text nodes. */
 private const val CLEAR_HIGHLIGHT_JS="""(function(){var ms=document.querySelectorAll('mark.qp-hl');for(var i=0;i<ms.length;i++){var m=ms[i],p=m.parentNode;while(m.firstChild)p.insertBefore(m.firstChild,m);p.removeChild(m);p.normalize();}return ms.length;})();"""
 
-internal const val LAST_CONTENT_PAGE_JS="""(function(){var v=document.getElementById('viewport'),sl=v?v.scrollLeft:0,n=document.querySelectorAll('#pages *'),right=0;for(var i=0;i<n.length;i++){var b=n[i].getBoundingClientRect();if(b.width<=0||b.height<=0)continue;var e=b.right+sl;if(e>right)right=e;}return Math.max(0,Math.ceil((right-1)/innerWidth)-1);})()"""
+internal const val LAST_CONTENT_PAGE_JS="""(function(){var right=${CONTENT_COLUMNS_JS}.right;return Math.max(0,Math.ceil((right-1)/innerWidth)-1);})()"""
 
-private const val CAPTURE="""(function(){var container=document.getElementById('pages'),margin=parseFloat(getComputedStyle(container).marginLeft),list=document.querySelectorAll('span[data-read]'),chosen=null,offset=0;var r=document.caretRangeFromPoint?document.caretRangeFromPoint(margin+1,10+parseFloat(getComputedStyle(container).fontSize)*.5):null;if(r&&r.startContainer.nodeType===3){var p=r.startContainer.parentElement;if(p&&p.hasAttribute('data-read')){chosen=p;offset=r.startOffset;}}if(!chosen){for(var i=0;i<list.length;i++){var rects=list[i].getClientRects();for(var j=0;j<rects.length;j++){var rect=rects[j];if(rect.right>0&&rect.left<innerWidth&&rect.bottom>0&&rect.top<innerHeight){chosen=list[i];break;}}if(chosen)break;}}var max=${LAST_CONTENT_PAGE_JS},page=Number(document.getElementById('pages').dataset.page||0);var starts=[0],heads=document.querySelectorAll("[data-chapter],h1,h2,h3");for(var k=0;k<heads.length;k++){var n=Math.max(0,Math.round((heads[k].getBoundingClientRect().left+document.getElementById("viewport").scrollLeft)/innerWidth));if(starts.indexOf(n)<0)starts.push(n);}starts.sort(function(a,b){return a-b;});var section=0,sectionEnd=max+1;for(var k=0;k<starts.length;k++){if(starts[k]<=page)section=starts[k];else{sectionEnd=starts[k];break;}}var visible=[];for(var k=0;k<list.length;k++){var rs=list[k].getClientRects();for(var j=0;j<rs.length;j++){if(rs[j].left<innerWidth&&rs[j].right>0&&rs[j].bottom>0&&rs[j].top<innerHeight){visible.push(list[k].textContent);break;}}}return JSON.stringify({anchor:chosen?chosen.id:'',offset:chosen?Number(chosen.getAttribute('data-read'))+offset:0,page:page,count:max+1,section:section,sectionEnd:sectionEnd,text:visible.join(" ")});})()"""
+private const val CAPTURE="""(function(){var container=document.getElementById('pages'),margin=parseFloat(getComputedStyle(container).marginLeft),list=document.querySelectorAll('span[data-read]'),chosen=null,offset=0;var r=document.caretRangeFromPoint?document.caretRangeFromPoint(margin+1,10+parseFloat(getComputedStyle(container).fontSize)*.5):null;if(r&&r.startContainer.nodeType===3){var p=r.startContainer.parentElement.closest('span[data-read]');if(p){chosen=p;var rr=document.createRange();rr.setStart(p,0);rr.setEnd(r.startContainer,r.startOffset);offset=rr.toString().length;}}if(!chosen){for(var i=0;i<list.length;i++){var rects=list[i].getClientRects();for(var j=0;j<rects.length;j++){var rect=rects[j];if(rect.right>0&&rect.left<innerWidth&&rect.bottom>0&&rect.top<innerHeight){chosen=list[i];break;}}if(chosen)break;}}var max=${LAST_CONTENT_PAGE_JS},page=Number(document.getElementById('pages').dataset.page||0);var starts=[0],heads=document.querySelectorAll("[data-chapter],h1,h2,h3");for(var k=0;k<heads.length;k++){var n=Math.max(0,Math.round((heads[k].getBoundingClientRect().left+document.getElementById("viewport").scrollLeft)/innerWidth));if(starts.indexOf(n)<0)starts.push(n);}starts.sort(function(a,b){return a-b;});var section=0,sectionEnd=max+1;for(var k=0;k<starts.length;k++){if(starts[k]<=page)section=starts[k];else{sectionEnd=starts[k];break;}}var chapterTitle="";for(var k=0;k<heads.length;k++){var hp=Math.max(0,Math.round((heads[k].getBoundingClientRect().left+document.getElementById("viewport").scrollLeft)/innerWidth));if(hp<=page)chapterTitle=heads[k].textContent;}var visible=[],offsets=[];for(var k=0;k<list.length;k++){var rs=list[k].getClientRects();for(var j=0;j<rs.length;j++){if(rs[j].left<innerWidth&&rs[j].right>0&&rs[j].bottom>0&&rs[j].top<innerHeight){var t=list[k].textContent,b=Number(list[k].getAttribute("data-read"));if(visible.length)offsets.push(b);for(var z=0;z<t.length;z++)offsets.push(b+z);visible.push(t);break;}}}return JSON.stringify({anchor:chosen?chosen.id:'',offset:chosen?Number(chosen.getAttribute('data-read'))+offset:0,page:page,count:max+1,section:section,sectionEnd:sectionEnd,text:visible.join(" "),offsets:offsets,chapter:chapterTitle});})()"""
 /**
  * Quotes a string as a JavaScript literal.
  *
@@ -248,7 +294,7 @@ internal fun jsQuote(value:String):String=buildString {
 
 internal fun restoreScript(locator:Locator):String {
     val anchor=jsQuote(locator.anchor)
-    return """(function(){${CLEAR_HIGHLIGHT_JS}var container=document.getElementById('pages'),margin=parseFloat(getComputedStyle(container).marginLeft);container.style.width=(innerWidth-margin*2)+'px';container.style.columnWidth=(innerWidth-margin*2)+'px';document.getElementById('viewport').style.width=innerWidth+'px';document.getElementById('viewport').scrollLeft=0;container.dataset.page=0;var max=${LAST_CONTENT_PAGE_JS};document.getElementById('extent').style.left=((max+1)*innerWidth-1)+'px';if(${locator.offset}>=9007199254740991){var e=document.getElementById('pages'),lp=${nearestContentPageJs("max")};e.dataset.page=lp;document.getElementById('viewport').scrollLeft=lp*innerWidth;return;}var anchor=$anchor,n=null,rect=null;if(anchor.indexOf('book-')===0)n=document.getElementById(anchor);if(n)rect=n.getBoundingClientRect();else{var target=${locator.offset.coerceAtLeast(0)},list=document.querySelectorAll('span[data-read]');for(var i=0;i<list.length;i++){if(Number(list[i].getAttribute('data-read'))<=target)n=list[i];else break;}if(n&&n.firstChild){var r=document.createRange(),o=Math.max(0,Math.min(n.firstChild.length,target-Number(n.getAttribute('data-read'))));r.setStart(n.firstChild,o);r.setEnd(n.firstChild,Math.min(n.firstChild.length,o+1));rect=r.getBoundingClientRect();}}var e=document.getElementById('pages'),raw=rect?Math.max(0,Math.min(max,Math.floor(rect.left/innerWidth))):0,page=${nearestContentPageJs("raw")};e.dataset.page=page;document.getElementById('viewport').scrollLeft=page*innerWidth;})()"""
+    return """(function(){${CLEAR_HIGHLIGHT_JS}var container=document.getElementById('pages'),margin=parseFloat(getComputedStyle(container).marginLeft);container.style.width=(innerWidth-margin*2)+'px';container.style.columnWidth=(innerWidth-margin*2)+'px';document.getElementById('viewport').style.width=innerWidth+'px';document.getElementById('viewport').scrollLeft=0;container.dataset.page=0;var max=${LAST_CONTENT_PAGE_JS};document.getElementById('extent').style.left=((max+1)*innerWidth-1)+'px';if(${locator.offset}>=9007199254740991){var e=document.getElementById('pages'),lp=${nearestContentPageJs("max")};e.dataset.page=lp;document.getElementById('viewport').scrollLeft=lp*innerWidth;return;}var anchor=$anchor,n=null,rect=null;if(anchor.indexOf('book-')===0)n=document.getElementById(anchor);if(n)rect=n.getBoundingClientRect();else{var target=${locator.offset.coerceAtLeast(0)},list=document.querySelectorAll('span[data-read]');for(var i=0;i<list.length;i++){if(Number(list[i].getAttribute('data-read'))<=target)n=list[i];else break;}if(n&&n.firstChild){var walk=document.createTreeWalker(n,NodeFilter.SHOW_TEXT),leaf,o=Math.max(0,target-Number(n.getAttribute('data-read')));while(leaf=walk.nextNode()){if(o<=leaf.length){var r=document.createRange();r.setStart(leaf,o);r.setEnd(leaf,Math.min(leaf.length,o+1));rect=r.getBoundingClientRect();break;}o-=leaf.length;}}}var e=document.getElementById('pages'),raw=rect?Math.max(0,Math.min(max,Math.floor(rect.left/innerWidth))):0,page=${nearestContentPageJs("raw")};e.dataset.page=page;document.getElementById('viewport').scrollLeft=page*innerWidth;})()"""
 }
 
 
