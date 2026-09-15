@@ -21,9 +21,9 @@ for(var b=0;b<blocks.length;b++){
   while(end<chars.length&&used+chars[end].w<=limit){used+=chars[end].w;end++;}
   if(end===chars.length)break;if(end===at){at++;first=false;continue;}
   var stop=end+1;while(stop<chars.length&&close.indexOf(chars[stop].ch)>=0)stop++;
-  var wanted=used,room=0;for(var j=at;j<stop;j++){var c=chars[j];if(j>=end)wanted+=c.w;if((open+close).indexOf(c.ch)>=0)room+=Math.max(0,(c.w-spacing)*.5);}
-  var need=wanted-limit+.25;
-  if(need>0&&need<=room){for(var j=at;j<stop;j++){var c=chars[j];if((open+close).indexOf(c.ch)>=0)c.cut=(c.w-spacing)*.5*need/room;}end=stop;}
+  var wanted=used,room=0;for(var j=at;j<stop;j++){var c=chars[j];if(j>=end)wanted+=c.w;if((open+close).indexOf(c.ch)>=0)room+=Math.max(0,(c.w-spacing)*(j===stop-1&&'，。、！？：；'.indexOf(c.ch)>=0?1:.5));}
+  var need=wanted-limit;
+  if(need>0&&need<=room){for(var j=at;j<stop;j++){var c=chars[j];if((open+close).indexOf(c.ch)>=0)c.cut=(c.w-spacing)*(j===stop-1&&'，。、！？：；'.indexOf(c.ch)>=0?1:.5)*need/room;}end=stop;}
   at=end;first=false;
  }
  // Only punctuation gets a new inline box; text and data-read offsets are intact.

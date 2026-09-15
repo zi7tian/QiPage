@@ -84,7 +84,7 @@ internal class TxtPaginator(val content:TextContent,val toc:List<Chapter>,val pr
     suspend fun index(chapter:Int):LongArray=indexMutex.withLock {buildIndex(chapter)}
     private suspend fun buildIndex(chapter:Int):LongArray {
         indexes[chapter]?.let{return it}
-        val key="p5-punctuation-v1:${toc.any {it.locator.offset==starts[chapter]}}:${starts[chapter]}:${end(chapter)}:$width:$height:$density:$fontScale:${prefs.fontSize}:${prefs.lineSpacing}:${prefs.paragraphSpacing}:${prefs.letterSpacing}:${prefs.justify}:${prefs.fontFile}:${content.encoding}:${content.length}"
+        val key="p5-punctuation-v2:${toc.any {it.locator.offset==starts[chapter]}}:${starts[chapter]}:${end(chapter)}:$width:$height:$density:$fontScale:${prefs.fontSize}:${prefs.lineSpacing}:${prefs.paragraphSpacing}:${prefs.letterSpacing}:${prefs.justify}:${prefs.fontFile}:${content.encoding}:${content.length}"
         val hash=java.security.MessageDigest.getInstance("SHA-256").digest(key.toByteArray()).joinToString(""){"%02x".format(it)}
         val file=File(cache,"$hash.pages")
         runCatching {DataInputStream(file.inputStream().buffered()).use {input->

@@ -38,17 +38,18 @@ internal fun punctuationLayout(text:Spannable,paint:TextPaint,width:Int,build:()
             while(stop<text.length && text[stop] in CJK_CLOSE)stop++
             val candidates=(start until stop).filter{text[it] in CJK_OPEN || text[it] in CJK_CLOSE}
             if(candidates.isEmpty())continue
-            val needed=Layout.getDesiredWidth(text,start,stop,paint)-width+1f
+            val needed=Layout.getDesiredWidth(text,start,stop,paint)-width
             if(needed<=0)continue
+            fun minimum(i:Int)=if(i==stop-1 && text[i] in "，。、！？：；")0f else .5f
             val room=candidates.sumOf { i->
                 val old=text.getSpans(i,i+1,PunctuationSpaceSpan::class.java).firstOrNull()?.fraction?:1f
-                (paint.measureText(text,i,i+1)*(old-.5f).coerceAtLeast(0f)).toDouble()
+                (paint.measureText(text,i,i+1)*(old-minimum(i)).coerceAtLeast(0f)).toDouble()
             }.toFloat()
-            if(room+0.01f<needed)continue
+            if(room<=0f || room+0.01f<needed)continue
             candidates.forEach {i->
                 val spans=text.getSpans(i,i+1,PunctuationSpaceSpan::class.java)
                 val old=spans.firstOrNull()?.fraction?:1f
-                val fraction=(old-(old-.5f)*needed/room).coerceAtLeast(.5f)
+                val fraction=(old-(old-minimum(i))*needed/room).coerceAtLeast(minimum(i))
                 spans.forEach(text::removeSpan)
                 text.setSpan(PunctuationSpaceSpan(fraction),i,i+1,Spannable.SPAN_EXCLUSIVE_EXCLUSIVE)
             }
